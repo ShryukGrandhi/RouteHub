@@ -412,6 +412,8 @@ cp -r RouteHub/skills/routehub ~/.claude/skills/
 
 ## Development
 
+Commands, invariants and PR conventions for contributors and coding agents are in [CLAUDE.md](CLAUDE.md).
+
 ```bash
 uv sync
 uv run pytest                        # 231 offline tests, no API keys needed

@@ -287,8 +287,10 @@ def _translate_messages(
     turns: List[dict] = []
     for message in messages:
         role = message.get("role")
+        blocks: List[dict] = []
         if role in ("system", "developer"):
-            system.extend(_content_blocks(message.get("content")))
+            blocks = _content_blocks(message.get("content"))
+            system.extend(blocks)
         elif role == "user":
             blocks = _content_blocks(message.get("content"))
             if blocks:
@@ -323,6 +325,7 @@ def _translate_messages(
                 result["content"] = content
             if message.get("is_error"):
                 result["is_error"] = True
+            blocks = [result]
             previous = turns[-1] if turns else None
             # Results of one parallel tool turn must share a user message.
             if (
@@ -336,6 +339,9 @@ def _translate_messages(
                 previous["content"].append(result)
             else:
                 turns.append({"role": "user", "content": [result]})
+        marker = message.get("cache_control")
+        if marker and blocks:
+            blocks[-1].setdefault("cache_control", marker)
     return system, turns
 
 

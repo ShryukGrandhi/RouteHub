@@ -399,6 +399,16 @@ Other differences to plan for:
 - Requests to OpenAI with `max_tokens` are sent as `max_completion_tokens`, which every current OpenAI chat model accepts and reasoning models require.
 - litellm-only keyword arguments such as `metadata` and `caching` are accepted and ignored.
 
+## Agent skill
+
+[skills/routehub](skills/routehub/SKILL.md) is an [Agent Skill](https://agentskills.io) that shows coding agents how to call RouteHub correctly, including which litellm habits break here. To install it for Claude Code, copy the folder into `~/.claude/skills/` for every project, or into a project's `.claude/skills/`:
+
+```bash
+git clone https://github.com/The-Swarm-Corporation/RouteHub.git
+mkdir -p ~/.claude/skills
+cp -r RouteHub/skills/routehub ~/.claude/skills/
+```
+
 
 ## Development
 

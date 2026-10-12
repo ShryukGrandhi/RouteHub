@@ -1018,14 +1018,14 @@ class StreamTranslator:
                     if partial
                     else []
                 )
+            if index not in self._block_tool:
+                return []
             return [
                 self._chunk(
                     {
                         "tool_calls": [
                             {
-                                "index": self._block_tool.get(
-                                    index, 0
-                                ),
+                                "index": self._block_tool[index],
                                 "function": {"arguments": partial},
                             }
                         ]

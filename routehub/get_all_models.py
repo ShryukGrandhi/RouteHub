@@ -428,6 +428,41 @@ def _parse_fireworks(items: List[dict]) -> List[dict]:
     ]
 
 
+def _parse_cohere(items: List[dict]) -> List[dict]:
+    """Parse Cohere's model records.
+
+    Args:
+        items (List[dict]): Raw records.
+
+    Returns:
+        List[dict]: Common entries.
+    """
+    entries = []
+    for item in items:
+        endpoints = item.get("endpoints") or []
+        features = item.get("features") or []
+        if "chat" in endpoints:
+            kind = "chat"
+        elif "rerank" in endpoints:
+            kind = "rerank"
+        else:
+            kind = _guess_type(item["name"])
+        entries.append(
+            _entry(
+                "cohere",
+                item["name"],
+                item,
+                type=kind,
+                context_window=item.get("context_length") or None,
+                supports_vision="vision" in features,
+                supports_function_calling="tools" in features,
+                supports_reasoning="reasoning" in features,
+                supports_structured_output="json_schema" in features,
+            )
+        )
+    return entries
+
+
 def _openrouter_fields(
     item: dict, params: set, pricing: dict
 ) -> dict:
@@ -701,6 +736,15 @@ SOURCES: Dict[str, ModelSource] = {
             detail_url="https://api.cerebras.ai/v1/models/{model}",
         ),
         ModelSource(
+            "cohere",
+            "https://api.cohere.com/v1/models",
+            _parse_cohere,
+            ("COHERE_API_KEY", "CO_API_KEY"),
+            list_key="models",
+            params={"page_size": 1000},
+            page_param="page_token",
+        ),
+        ModelSource(
             "ollama",
             "http://localhost:11434/api/tags",
             _parse_ollama,
@@ -830,6 +874,8 @@ def _records(
         cursor = body.get("last_id")
     elif source.page_param == "pageToken":
         cursor = body.get("nextPageToken")
+    elif source.page_param == "page_token":
+        cursor = body.get("next_page_token")
     return records, cursor
 
 

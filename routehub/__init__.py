@@ -12,6 +12,8 @@ _LAZY = {
     "aembedding": "routehub.main",
     "responses": "routehub.main",
     "aresponses": "routehub.main",
+    "batched_completions": "routehub.main",
+    "BatchJob": "routehub.main",
     "get_reasoning_efforts": "routehub.main",
     "REASONING_EFFORTS": "routehub.main",
     "get_llm_provider": "routehub.providers",

@@ -12,6 +12,7 @@ Everything lives in `routehub/`.
 
 - `__init__.py`: lazy public names. `_LAZY` maps each name to its submodule, and the PEP 562 `__getattr__` imports it on first access.
 - `main.py`: `completion`, `acompletion`, `embedding`, `aembedding`, `responses`, `aresponses`. Splits arguments into request parameters and gateway options (`_split_args`, `_build_call`), runs the OpenAI-compatible path, and holds the Anthropic send and retry loop (`_anthropic_send`).
+- `batches.py`: `batched_completions` and `BatchJob`, which send chat requests through OpenAI's Batch API. Each request is built by `main.py`'s `_split_args`, `_build_call` and `_openai_request`, so a batch line matches a direct call.
 - `providers.py`: the `PROVIDERS` table, provider aliases, and model-string resolution (`split_model`, `get_llm_provider`).
 - `clients.py`: the client cache. LRU of 64 clients, keyed by every setting that changes the client and, for async clients, the running event loop. Sets pool limits and keep-alive (`keepalive_expiry`, default 60 seconds).
 - `anthropic.py`: OpenAI chat to Messages translation (`build_request`, `to_chat_completion`) and the SSE `StreamTranslator`.

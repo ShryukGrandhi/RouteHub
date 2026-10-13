@@ -157,6 +157,33 @@ ROUTES = {
             "pricing": {"input": 0.88, "output": 0.88},
         }
     ],
+    "api.cohere.com/v1/models": {
+        "models": [
+            {
+                "name": "command-a-plus-05-2026",
+                "endpoints": ["generate", "chat"],
+                "context_length": 128000,
+                "features": [
+                    "json_schema",
+                    "tools",
+                    "reasoning",
+                    "vision",
+                ],
+            },
+            {
+                "name": "embed-english-v3.0-image",
+                "endpoints": ["embed_image"],
+                "context_length": 0,
+                "features": None,
+            },
+            {
+                "name": "rerank-v3.5",
+                "endpoints": ["rerank"],
+                "context_length": 4096,
+                "features": None,
+            },
+        ]
+    },
 }
 
 
@@ -306,6 +333,28 @@ class TestParsers:
         assert together["input_cost_per_token"] == pytest.approx(
             0.88e-6
         )
+
+    def test_cohere_types_and_features(
+        self, provider_api, monkeypatch
+    ):
+        monkeypatch.setenv("CO_API_KEY", "test-co")
+        entries = by_id(gam.get_models("cohere"))
+        plus = entries["cohere/command-a-plus-05-2026"]
+        assert plus["type"] == "chat"
+        assert plus["context_window"] == 128000
+        assert plus["supports_function_calling"] is True
+        assert plus["supports_vision"] is True
+        assert plus["supports_reasoning"] is True
+        assert plus["supports_structured_output"] is True
+        embed = entries["cohere/embed-english-v3.0-image"]
+        assert embed["type"] == "embedding"
+        assert embed["context_window"] is None
+        assert embed["supports_function_calling"] is False
+        assert entries["cohere/rerank-v3.5"]["type"] == "rerank"
+        assert (
+            provider_api[-1][1]["authorization"] == "Bearer test-co"
+        )
+        assert provider_api[-1][2]["page_size"] == "1000"
 
     def test_openrouter_needs_no_key(self, provider_api, monkeypatch):
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

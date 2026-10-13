@@ -840,6 +840,38 @@ class TestStreamTranslation:
             assert names == {0: "now"}
             assert json.loads(args[0]) == {}
 
+    def test_server_tool_input_is_not_streamed_as_a_tool_call(self):
+        translator = anthropic.StreamTranslator(
+            "m", include_usage=False, json_mode=False
+        )
+        events = []
+        for index, kind, name, partial in (
+            (0, "server_tool_use", "web_search", '{"query": "x"}'),
+            (1, "tool_use", "book_trip", '{"city": "Paris"}'),
+        ):
+            block = {"type": kind, "id": f"b{index}", "name": name}
+            delta = {
+                "type": "input_json_delta",
+                "partial_json": partial,
+            }
+            events += [
+                (
+                    "content_block_start",
+                    {"index": index, "content_block": block},
+                ),
+                (
+                    "content_block_delta",
+                    {"index": index, "delta": delta},
+                ),
+                ("content_block_stop", {"index": index}),
+            ]
+        chunks = [
+            c for e, d in events for c in translator.handle(e, d)
+        ]
+        _, _, names, args, _, _ = collect(chunks)
+        assert names == {0: "book_trip"}
+        assert args == {0: '{"city": "Paris"}'}
+
     def test_no_usage_chunk_unless_requested(self):
         translator = anthropic.StreamTranslator(
             "m", include_usage=False, json_mode=False

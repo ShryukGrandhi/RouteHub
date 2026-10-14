@@ -273,9 +273,9 @@ results = routehub.batched_completions(
 )
 ```
 
-`batched_completions` sends the requests through OpenAI's Batch API, which costs about half as much as regular calls and finishes within 24 hours. Each request takes the same arguments as `completion`; keyword arguments such as `api_key` or `temperature` apply to every request. It polls every `poll_interval` seconds (30 by default) and returns one `ChatCompletion` per request in request order, or the RouteHub exception for a request that failed, without failing the rest. It raises `Timeout` after `timeout` seconds (24 hours by default) while the batch keeps running.
+`batched_completions` sends the requests through OpenAI's Batch API, or Anthropic's Message Batches API for Claude models. Both cost about half as much as regular calls and finish within 24 hours. Each request takes the same arguments as `completion`; keyword arguments such as `api_key` or `temperature` apply to every request. It polls every `poll_interval` seconds (30 by default) and returns one `ChatCompletion` per request in request order, or the RouteHub exception for a request that failed, without failing the rest. It raises `Timeout` after `timeout` seconds (24 hours by default) while the batch keeps running.
 
-Pass `wait=False` to get a `BatchJob` back at once, with `status()`, `results()` and `cancel()`. Another process can collect the work with `routehub.BatchJob("openai", job.id).results()`. Other providers raise `BadRequestError` for now.
+Pass `wait=False` to get a `BatchJob` back at once, with `status()`, `results()` and `cancel()`. Another process can collect the work with `routehub.BatchJob("openai", job.id).results()`, or `routehub.BatchJob("anthropic", job.id)` for a Claude batch. Other providers raise `BadRequestError` for now.
 
 ### Testing without a provider
 

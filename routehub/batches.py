@@ -1,15 +1,17 @@
-"""Chat completions through OpenAI's Batch API."""
+"""Chat completions through OpenAI's and Anthropic's batch APIs."""
 
 import inspect
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Any, Iterator, List
+from dataclasses import dataclass, field
+from typing import Any, Iterator, List, Optional
 
 from routehub._json import dumps, loads
-from routehub.clients import openai_client
+from routehub.clients import http_client, openai_client
 from routehub.main import (
     DEFAULT_NUM_RETRIES,
+    _anthropic_prepare,
+    _anthropic_send,
     _build_call,
     _openai_client,
     _openai_request,
@@ -18,7 +20,7 @@ from routehub.main import (
 )
 from routehub.providers import get_llm_provider
 
-_BATCH_DONE = ("completed", "failed", "expired", "cancelled")
+_BATCH_DONE = ("completed", "failed", "expired", "cancelled", "ended")
 
 
 @contextmanager
@@ -48,48 +50,93 @@ class BatchJob:
     """A submitted batch, rebuildable from its provider and id.
 
     Args:
-        provider (str): Provider the batch runs on, such as "openai".
+        provider (str): Provider the batch runs on, "openai" or
+            "anthropic".
         id (str): The provider's batch id.
-        client (Any): An OpenAI client; built from environment
-            variables when omitted.
+        client (Any): An OpenAI client for openai, or an httpx client
+            for anthropic; built when omitted.
+        api_key (Optional[str]): API key; read from the provider's
+            environment variable when omitted.
+        api_base (Optional[str]): Base URL; read from the provider's
+            environment variable or default when omitted.
     """
 
     provider: str
     id: str
     client: Any = None
+    api_key: Optional[str] = field(default=None, repr=False)
+    api_base: Optional[str] = None
 
     def __post_init__(self) -> None:
-        """Build a client from environment variables when none is given."""
-        if self.client is None:
-            _, provider, key, base = get_llm_provider(
-                self.provider, self.provider
+        """Resolve the key and base URL, and build a missing client."""
+        _, self.provider, self.api_key, self.api_base = (
+            get_llm_provider(
+                self.provider,
+                self.provider,
+                self.api_base,
+                self.api_key,
             )
+        )
+        if self.client is not None:
+            return
+        if self.provider == "anthropic":
+            self.client = http_client(is_async=False, ssl_verify=True)
+        else:
             self.client = openai_client(
-                provider,
-                key,
-                base,
+                self.provider,
+                self.api_key,
+                self.api_base,
                 is_async=False,
                 max_retries=DEFAULT_NUM_RETRIES,
                 ssl_verify=True,
             )
+
+    def _anthropic(self, method: str, path: str = "") -> Any:
+        """Send one Message Batches request for this batch.
+
+        Args:
+            method (str): HTTP method.
+            path (str): Path after the batch id, such as "/cancel".
+
+        Returns:
+            Any: The successful HTTP response.
+        """
+        from routehub import anthropic
+
+        response = self.client.request(
+            method,
+            f"{anthropic.messages_url(self.api_base)}/batches/"
+            f"{self.id}{path}",
+            headers=anthropic.headers(self.api_key, None),
+        )
+        if response.status_code >= 400:
+            raise anthropic.response_error(response, "")
+        return response
 
     def status(self) -> str:
         """Return the batch's current status.
 
         Returns:
             str: The provider's status, such as "in_progress" or
-            "completed".
+            "completed", or "ended" for anthropic.
         """
         with _mapped_errors(self.provider):
+            if self.provider == "anthropic":
+                response = self._anthropic("GET")
+                return loads(response.content)["processing_status"]
             return self.client.batches.retrieve(self.id).status
 
     def cancel(self) -> str:
         """Ask the provider to stop the batch.
 
         Returns:
-            str: The status after the request, usually "cancelling".
+            str: The status after the request, usually "cancelling",
+            or "canceling" for anthropic.
         """
         with _mapped_errors(self.provider):
+            if self.provider == "anthropic":
+                response = self._anthropic("POST", "/cancel")
+                return loads(response.content)["processing_status"]
             return self.client.batches.cancel(self.id).status
 
     def results(self) -> List[Any]:
@@ -108,6 +155,35 @@ class BatchJob:
             exception_for_status,
         )
 
+        if self.provider == "anthropic":
+            from routehub import anthropic
+
+            with _mapped_errors(self.provider):
+                batch = loads(self._anthropic("GET").content)
+                if batch["processing_status"] != "ended":
+                    raise BadRequestError(
+                        f"Batch {self.id} has status "
+                        f"{batch['processing_status']}.",
+                        llm_provider=self.provider,
+                    )
+                lines = self._anthropic("GET", "/results").content
+            results = [None] * sum(batch["request_counts"].values())
+            for raw in lines.splitlines():
+                line = loads(raw)
+                result = line["result"]
+                if result["type"] == "succeeded":
+                    results[int(line["custom_id"])] = (
+                        anthropic.to_chat_completion(
+                            result["message"], "", True
+                        )
+                    )
+                elif result["type"] == "errored":
+                    results[int(line["custom_id"])] = (
+                        anthropic.stream_error(
+                            result["error"]["error"], ""
+                        )
+                    )
+            return results
         with _mapped_errors(self.provider):
             batch = self.client.batches.retrieve(self.id)
             if (
@@ -153,10 +229,11 @@ def batched_completions(
     timeout: float = 24 * 3600,
     **kwargs: Any,
 ) -> Any:
-    """Run chat completions through OpenAI's Batch API.
+    """Run chat completions through OpenAI's or Anthropic's batch API.
 
     Args:
-        model (str): OpenAI model name, such as "gpt-5.4-mini".
+        model (str): OpenAI or Claude model name, such as
+            "gpt-5.4-mini" or "claude-sonnet-4-6".
         requests (List[dict]): completion arguments for each request,
             such as messages and max_tokens.
         wait (bool): Poll until the batch finishes and return its
@@ -187,6 +264,10 @@ def batched_completions(
             if n != "kwargs"
         }
         call = _build_call(*_split_args({**named, "kwargs": args}))
+        if call.provider == "anthropic":
+            url, headers, body, _ = _anthropic_prepare(call)
+            lines.append({"custom_id": str(i), "params": body})
+            continue
         body, extra_body = _openai_request(call)
         lines.append(
             {
@@ -196,24 +277,46 @@ def batched_completions(
                 "body": {**body, **extra_body},
             }
         )
-    if call.provider != "openai":
+    if call.provider == "anthropic":
+        client = call.client or http_client(
+            is_async=False,
+            ssl_verify=call.ssl_verify,
+            keepalive_expiry=call.keepalive_expiry,
+        )
+        response = _anthropic_send(
+            client,
+            url + "/batches",
+            headers,
+            {"requests": lines},
+            call,
+        )
+        job = BatchJob(
+            call.provider,
+            loads(response.content)["id"],
+            client,
+            call.api_key,
+            call.api_base,
+        )
+    elif call.provider != "openai":
         raise BadRequestError(
-            f"batched_completions supports openai, not {call.provider}.",
+            "batched_completions supports openai and anthropic, "
+            f"not {call.provider}.",
             llm_provider=call.provider,
             model=model,
         )
-    with _mapped_errors(call.provider, model):
-        client = _openai_client(call, is_async=False)
-        upload = client.files.create(
-            file=("batch.jsonl", b"\n".join(map(dumps, lines))),
-            purpose="batch",
-        )
-        batch = client.batches.create(
-            input_file_id=upload.id,
-            endpoint="/v1/chat/completions",
-            completion_window="24h",
-        )
-    job = BatchJob(call.provider, batch.id, client)
+    else:
+        with _mapped_errors(call.provider, model):
+            client = _openai_client(call, is_async=False)
+            upload = client.files.create(
+                file=("batch.jsonl", b"\n".join(map(dumps, lines))),
+                purpose="batch",
+            )
+            batch = client.batches.create(
+                input_file_id=upload.id,
+                endpoint="/v1/chat/completions",
+                completion_window="24h",
+            )
+        job = BatchJob(call.provider, batch.id, client)
     if not wait:
         return job
     deadline = time.monotonic() + timeout

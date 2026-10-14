@@ -80,3 +80,101 @@ class TestBatches:
             results[1], openai.types.chat.ChatCompletion
         )
         assert results[1].choices[0].message.content == "Second"
+
+    def test_claude_batch_runs_on_message_batches(self, mock_http):
+        def batch(status):
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msgbatch_1",
+                    "processing_status": status,
+                    "request_counts": {
+                        "processing": 0,
+                        "succeeded": 1,
+                        "errored": 1,
+                        "canceled": 0,
+                        "expired": 0,
+                    },
+                },
+            )
+
+        lines = [
+            {
+                "custom_id": "1",
+                "result": {
+                    "type": "succeeded",
+                    "message": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-sonnet-4-6",
+                        "content": [
+                            {"type": "text", "text": "Second"}
+                        ],
+                        "stop_reason": "end_turn",
+                        "usage": {
+                            "input_tokens": 3,
+                            "output_tokens": 1,
+                        },
+                    },
+                },
+            },
+            {
+                "custom_id": "0",
+                "result": {
+                    "type": "errored",
+                    "error": {
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "prompt is too long: 9 tokens > 8 maximum",
+                        },
+                    },
+                },
+            },
+        ]
+        client, recorder = mock_http(
+            batch("in_progress"),
+            batch("in_progress"),
+            batch("ended"),
+            batch("ended"),
+            httpx.Response(
+                200,
+                content="".join(
+                    json.dumps(line) + "\n" for line in lines
+                ).encode(),
+            ),
+        )
+        results = rh.batched_completions(
+            model="claude-sonnet-4-6",
+            requests=[
+                {"messages": USER, "max_tokens": 5},
+                {"messages": USER},
+            ],
+            poll_interval=0,
+            client=client,
+        )
+        submitted = json.loads(recorder.requests[0].content)
+        assert recorder.requests[0].url.path == "/v1/messages/batches"
+        assert [r["custom_id"] for r in submitted["requests"]] == [
+            "0",
+            "1",
+        ]
+        assert submitted["requests"][0]["params"]["max_tokens"] == 5
+        assert (
+            submitted["requests"][0]["params"]["model"]
+            == "claude-sonnet-4-6"
+        )
+        assert (
+            recorder.requests[0].headers["x-api-key"]
+            == "test-anthropic_api_key"
+        )
+        assert (
+            recorder.requests[-1].url.path
+            == "/v1/messages/batches/msgbatch_1/results"
+        )
+        assert isinstance(results[0], rh.ContextWindowExceededError)
+        assert isinstance(
+            results[1], openai.types.chat.ChatCompletion
+        )
+        assert results[1].choices[0].message.content == "Second"

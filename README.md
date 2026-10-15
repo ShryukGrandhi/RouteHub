@@ -277,6 +277,8 @@ results = routehub.batched_completions(
 
 Pass `wait=False` to get a `BatchJob` back at once, with `status()`, `results()` and `cancel()`. Another process can collect the work with `routehub.BatchJob("openai", job.id).results()`, `routehub.BatchJob("groq", job.id)` for a Groq batch, or `routehub.BatchJob("anthropic", job.id)` for a Claude batch. Other providers raise `BadRequestError` for now.
 
+`await routehub.abatched_completions(...)` takes the same arguments and keeps the event loop free while the batch runs.
+
 ### Testing without a provider
 
 ```python

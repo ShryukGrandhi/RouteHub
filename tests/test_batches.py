@@ -82,6 +82,42 @@ class TestBatches:
         )
         assert results[1].choices[0].message.content == "Second"
 
+    async def test_abatched_completions_collects_results(
+        self, mock_openai
+    ):
+        done = httpx.Response(
+            200,
+            json={
+                "id": "batch_1",
+                "status": "completed",
+                "output_file_id": "file-out",
+                "request_counts": {"total": 1, "completed": 1},
+            },
+        )
+        line = {
+            "custom_id": "0",
+            "response": {
+                "status_code": 200,
+                "body": chat_completion(content="Async"),
+            },
+        }
+        client, _ = mock_openai(
+            httpx.Response(200, json={"id": "file-in"}),
+            httpx.Response(
+                200, json={"id": "batch_1", "status": "validating"}
+            ),
+            done,
+            done,
+            httpx.Response(200, content=json.dumps(line).encode()),
+        )
+        results = await rh.abatched_completions(
+            model="gpt-5.4-mini",
+            requests=[{"messages": USER}],
+            poll_interval=0,
+            client=client,
+        )
+        assert results[0].choices[0].message.content == "Async"
+
     def test_requests_an_expired_batch_never_ran_are_none(
         self, mock_openai
     ):

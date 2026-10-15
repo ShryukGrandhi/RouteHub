@@ -435,6 +435,25 @@ def _sdk_params(completions: Any) -> frozenset:
     return _SDK_PARAMS[kind]
 
 
+def _drop_rejected(call: _Call, request: dict, effort: str) -> None:
+    """Remove what an OpenAI model rejects, when drop_params is on.
+
+    Args:
+        call (_Call): The resolved request.
+        request (dict): The create() arguments, changed in place.
+        effort (str): The reasoning parameter, "reasoning_effort" for
+            chat or "reasoning" for the Responses API.
+    """
+    if call.drop_params and call.provider in ("openai", "azure"):
+        if _is_openai_reasoning(call.bare):
+            for name in _REASONING_REJECTS:
+                if name == "temperature" and request.get(name) == 1:
+                    continue
+                request.pop(name, None)
+        else:
+            request.pop(effort, None)
+
+
 def _openai_request(call: _Call) -> Tuple[dict, dict]:
     """Build the chat.completions.create arguments for a provider.
 
@@ -473,14 +492,7 @@ def _openai_request(call: _Call) -> Tuple[dict, dict]:
         request["tools"] = [
             _strip_cache_control(t) for t in request["tools"]
         ]
-    if call.drop_params and call.provider in ("openai", "azure"):
-        if reasoning_model:
-            for name in _REASONING_REJECTS:
-                if name == "temperature" and request.get(name) == 1:
-                    continue
-                request.pop(name, None)
-        else:
-            request.pop("reasoning_effort", None)
+    _drop_rejected(call, request, "reasoning_effort")
 
     extra_body = dict(call.extra_body or {})
     if not call.drop_params:
@@ -1542,6 +1554,7 @@ def _responses_request(
     if call.drop_params:
         accepted = _sdk_params(resource)
         request = {k: v for k, v in request.items() if k in accepted}
+    _drop_rejected(call, request, "reasoning")
     _log(call.verbose, f"responses {call.provider} {call.bare}")
     extra_body = dict(call.extra_body or {})
     request = _create_kwargs(resource, request, extra_body, call)

@@ -1,6 +1,7 @@
 import json
 
 import openai
+import pytest
 from conftest import chat_completion
 
 import routehub as rh
@@ -178,3 +179,64 @@ class TestBatches:
             results[1], openai.types.chat.ChatCompletion
         )
         assert results[1].choices[0].message.content == "Second"
+
+    def test_groq_batch_runs_on_groq_batch_api(self, mock_openai):
+        client, recorder = mock_openai(
+            httpx.Response(200, json={"id": "file-in"}),
+            httpx.Response(
+                200, json={"id": "batch_1", "status": "validating"}
+            ),
+        )
+        job = rh.batched_completions(
+            model="groq/llama-3.1-8b-instant",
+            requests=[{"messages": USER, "max_tokens": 5}],
+            wait=False,
+            client=client,
+        )
+        upload = recorder.requests[0].content
+        assert b'"model":"llama-3.1-8b-instant"' in upload
+        assert b'"url":"/v1/chat/completions"' in upload
+        assert b'"max_tokens":5' in upload
+        created = json.loads(recorder.requests[1].content)
+        assert created["endpoint"] == "/v1/chat/completions"
+        assert (job.provider, job.id) == ("groq", "batch_1")
+        rebuilt = rh.BatchJob("groq", "batch_1")
+        assert (
+            str(rebuilt.client.base_url)
+            == "https://api.groq.com/openai/v1/"
+        )
+        assert rebuilt.api_key == "test-groq_api_key"
+
+    def test_groq_batch_results_and_failure(self, mock_openai):
+        body = {**chat_completion("Hi"), "service_tier": "on_demand"}
+        client, _ = mock_openai(
+            httpx.Response(
+                200,
+                json={
+                    "id": "batch_1",
+                    "status": "completed",
+                    "output_file_id": "file-out",
+                    "request_counts": {"total": 1},
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "custom_id": "0",
+                    "response": {"status_code": 200, "body": body},
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "id": "batch_1",
+                    "status": "failed",
+                    "errors": [{"message": "bad method"}],
+                },
+            ),
+        )
+        job = rh.BatchJob("groq", "batch_1", client)
+        [result] = job.results()
+        assert result.choices[0].message.content == "Hi"
+        with pytest.raises(rh.BadRequestError, match="bad method"):
+            job.results()

@@ -205,7 +205,9 @@ class BatchJob:
         results: List[Any] = [None] * batch.request_counts.total
         for raw in (r for t in texts for r in t.splitlines()):
             line = loads(raw)
-            response = line.get("response") or {}
+            response = line.get("response")
+            if response is None:
+                continue
             status = response.get("status_code", 500)
             body = response.get("body") or {}
             if status < 400:

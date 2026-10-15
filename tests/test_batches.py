@@ -82,6 +82,54 @@ class TestBatches:
         )
         assert results[1].choices[0].message.content == "Second"
 
+    def test_requests_an_expired_batch_never_ran_are_none(
+        self, mock_openai
+    ):
+        def jsonl(line):
+            return httpx.Response(
+                200, content=(json.dumps(line) + "\n").encode()
+            )
+
+        client, _ = mock_openai(
+            httpx.Response(
+                200,
+                json={
+                    "id": "batch_1",
+                    "status": "expired",
+                    "output_file_id": "file-out",
+                    "error_file_id": "file-err",
+                    "request_counts": {
+                        "total": 2,
+                        "completed": 1,
+                        "failed": 0,
+                    },
+                },
+            ),
+            jsonl(
+                {
+                    "custom_id": "0",
+                    "response": {
+                        "status_code": 200,
+                        "body": chat_completion(content="First"),
+                    },
+                    "error": None,
+                }
+            ),
+            jsonl(
+                {
+                    "custom_id": "1",
+                    "response": None,
+                    "error": {
+                        "code": "batch_expired",
+                        "message": "This request could not be executed before the completion window expired.",
+                    },
+                }
+            ),
+        )
+        results = rh.BatchJob("openai", "batch_1", client).results()
+        assert results[0].choices[0].message.content == "First"
+        assert results[1] is None
+
     def test_claude_batch_runs_on_message_batches(self, mock_http):
         def batch(status):
             return httpx.Response(

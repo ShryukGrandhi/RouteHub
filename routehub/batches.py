@@ -1,4 +1,4 @@
-"""Chat completions through OpenAI's and Anthropic's batch APIs."""
+"""Chat completions through OpenAI, Groq and Anthropic batch APIs."""
 
 import inspect
 import time
@@ -50,11 +50,11 @@ class BatchJob:
     """A submitted batch, rebuildable from its provider and id.
 
     Args:
-        provider (str): Provider the batch runs on, "openai" or
-            "anthropic".
+        provider (str): Provider the batch runs on, "openai",
+            "groq" or "anthropic".
         id (str): The provider's batch id.
-        client (Any): An OpenAI client for openai, or an httpx client
-            for anthropic; built when omitted.
+        client (Any): An OpenAI client for openai and groq, or an
+            httpx client for anthropic; built when omitted.
         api_key (Optional[str]): API key; read from the provider's
             environment variable when omitted.
         api_base (Optional[str]): Base URL; read from the provider's
@@ -190,7 +190,9 @@ class BatchJob:
                 batch.status == "failed"
                 or batch.status not in _BATCH_DONE
             ):
-                reasons = (batch.errors and batch.errors.data) or []
+                reasons = (
+                    getattr(batch.errors, "data", batch.errors) or []
+                )
                 raise BadRequestError(
                     f"Batch {self.id} has status {batch.status}. "
                     + " ".join(e.message or "" for e in reasons),
@@ -207,7 +209,7 @@ class BatchJob:
             status = response.get("status_code", 500)
             body = response.get("body") or {}
             if status < 400:
-                result = ChatCompletion.model_validate(body)
+                result = ChatCompletion.construct(**body)
             else:
                 error = line.get("error") or body.get("error") or {}
                 result = exception_for_status(
@@ -229,11 +231,12 @@ def batched_completions(
     timeout: float = 24 * 3600,
     **kwargs: Any,
 ) -> Any:
-    """Run chat completions through OpenAI's or Anthropic's batch API.
+    """Run chat completions through OpenAI, Groq or Anthropic batches.
 
     Args:
-        model (str): OpenAI or Claude model name, such as
-            "gpt-5.4-mini" or "claude-sonnet-4-6".
+        model (str): OpenAI, Groq or Claude model name, such as
+            "gpt-5.4-mini", "groq/llama-3.1-8b-instant" or
+            "claude-sonnet-4-6".
         requests (List[dict]): completion arguments for each request,
             such as messages and max_tokens.
         wait (bool): Poll until the batch finishes and return its
@@ -297,10 +300,10 @@ def batched_completions(
             call.api_key,
             call.api_base,
         )
-    elif call.provider != "openai":
+    elif call.provider not in ("openai", "groq"):
         raise BadRequestError(
-            "batched_completions supports openai and anthropic, "
-            f"not {call.provider}.",
+            "batched_completions supports openai, groq and "
+            f"anthropic, not {call.provider}.",
             llm_provider=call.provider,
             model=model,
         )

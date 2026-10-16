@@ -327,6 +327,36 @@ class TestBuildRequest:
         assert body["max_tokens"] == 20000
 
     @pytest.mark.parametrize(
+        "model", ["claude-opus-4-7", "claude-opus-5-5"]
+    )
+    def test_drop_params_turns_a_thinking_budget_adaptive(
+        self, model
+    ):
+        def request(drop_params):
+            return anthropic.build_request(
+                model,
+                [{"role": "user", "content": "Think"}],
+                {"reasoning_effort": "low", "max_tokens": 1000},
+                {
+                    "thinking": {
+                        "type": "enabled",
+                        "budget_tokens": 4000,
+                        "display": "summarized",
+                    }
+                },
+                drop_params,
+            )[0]
+
+        body = request(True)
+        assert body["thinking"] == {
+            "type": "adaptive",
+            "display": "summarized",
+        }
+        assert body["output_config"] == {"effort": "low"}
+        assert body["max_tokens"] == 1000
+        assert request(False)["thinking"]["budget_tokens"] == 4000
+
+    @pytest.mark.parametrize(
         ("output_config", "expected"),
         [
             (None, {"effort": "high"}),

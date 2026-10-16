@@ -69,6 +69,46 @@ class TestBuildRequest:
         ]
         assert body["max_tokens"] == anthropic.DEFAULT_MAX_TOKENS
 
+    def test_message_level_cache_markers_reach_the_last_block(self):
+        body = build(
+            [
+                {
+                    "role": "system",
+                    "content": "Handbook",
+                    "cache_control": CACHE,
+                },
+                {
+                    "role": "user",
+                    "content": "Which?",
+                    "cache_control": CACHE,
+                },
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "t1", "function": {"name": "a"}}
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "t1",
+                    "content": "Policy 7",
+                    "cache_control": CACHE,
+                },
+            ]
+        )
+        assert body["system"] == [
+            {
+                "type": "text",
+                "text": "Handbook",
+                "cache_control": CACHE,
+            }
+        ]
+        user, _, results = body["messages"]
+        assert user["content"] == [
+            {"type": "text", "text": "Which?", "cache_control": CACHE}
+        ]
+        assert results["content"][0]["cache_control"] == CACHE
+
     def test_images_become_base64_or_url_sources(self):
         body = build(
             [

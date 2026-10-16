@@ -465,6 +465,14 @@ def build_request(
             }
     if thinking and drop_params and not _supports_thinking(model):
         thinking = None
+    if (
+        drop_params
+        and thinking
+        and thinking.get("type") == "enabled"
+        and _adaptive_thinking_only(model)
+    ):
+        thinking = {**thinking, "type": "adaptive"}
+        thinking.pop("budget_tokens", None)
     if thinking:
         body["thinking"] = thinking
         if effort and thinking.get("type") == "adaptive":

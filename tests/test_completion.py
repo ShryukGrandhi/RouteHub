@@ -1015,3 +1015,34 @@ def test_responses_returns_a_response_and_maps_errors(mock_openai):
     assert recorder.last_json == {"model": "gpt-5.4", "input": "hi"}
     with pytest.raises(rh.RateLimitError):
         rh.responses("gpt-5.4", input="hi", client=client)
+
+
+def test_responses_drop_params_drops_what_the_model_rejects(
+    mock_openai,
+):
+    client, recorder = mock_openai(
+        httpx.Response(200, json={"id": "resp_1", "output": []}),
+        httpx.Response(200, json={"id": "resp_2", "output": []}),
+    )
+    rh.responses(
+        "o3",
+        input="hi",
+        temperature=0.2,
+        top_p=0.5,
+        drop_params=True,
+        client=client,
+    )
+    assert recorder.last_json == {"model": "o3", "input": "hi"}
+    rh.responses(
+        "gpt-4o",
+        input="hi",
+        temperature=0.2,
+        reasoning={"effort": "low"},
+        drop_params=True,
+        client=client,
+    )
+    assert recorder.last_json == {
+        "model": "gpt-4o",
+        "input": "hi",
+        "temperature": 0.2,
+    }

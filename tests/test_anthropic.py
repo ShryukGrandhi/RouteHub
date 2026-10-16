@@ -440,6 +440,40 @@ class TestBuildRequest:
             == 1
         )
 
+    def test_web_search_options_add_the_web_search_tool(self):
+        tool = {"type": "function", "function": {"name": "a"}}
+        body = build(
+            [{"role": "user", "content": "News?"}],
+            tools=[tool],
+            web_search_options={
+                "search_context_size": "high",
+                "user_location": {
+                    "type": "approximate",
+                    "approximate": {"city": "Paris", "country": "FR"},
+                },
+            },
+        )
+        assert [t["name"] for t in body["tools"]] == [
+            "a",
+            "web_search",
+        ]
+        assert body["tools"][1] == {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "user_location": {
+                "type": "approximate",
+                "city": "Paris",
+                "country": "FR",
+            },
+            "max_uses": 10,
+        }
+        assert build(
+            [{"role": "user", "content": "News?"}],
+            web_search_options={},
+        )["tools"] == [
+            {"type": "web_search_20250305", "name": "web_search"}
+        ]
+
     @pytest.mark.parametrize(
         "model", ["claude-sonnet-4-6", "claude-opus-5"]
     )

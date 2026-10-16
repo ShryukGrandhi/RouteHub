@@ -36,6 +36,8 @@ ADAPTIVE_EFFORTS = {
     "ultra": "max",
 }
 
+WEB_SEARCH_MAX_USES = {"low": 1, "medium": 5, "high": 10}
+
 _CLAUDE_VERSION = re.compile(
     r"claude-(?:[a-z]+-)?(\d+)(?:-(\d{1,2})(?!\d))?"
 )
@@ -555,6 +557,24 @@ def build_request(
                 },
             }
         body["tool_choice"] = choice
+
+    search = params.get("web_search_options")
+    if search is not None:
+        tool = {"type": "web_search_20250305", "name": "web_search"}
+        location = (search.get("user_location") or {}).get(
+            "approximate"
+        )
+        if location:
+            tool["user_location"] = {
+                **location,
+                "type": "approximate",
+            }
+        uses = WEB_SEARCH_MAX_USES.get(
+            search.get("search_context_size")
+        )
+        if uses:
+            tool["max_uses"] = uses
+        body.setdefault("tools", []).append(tool)
 
     schema = _json_schema(params.get("response_format"))
     json_mode = schema is not None

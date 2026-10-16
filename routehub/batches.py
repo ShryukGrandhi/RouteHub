@@ -334,3 +334,51 @@ def batched_completions(
             )
         time.sleep(poll_interval)
     return job.results()
+
+
+async def abatched_completions(
+    model: str,
+    requests: List[dict],
+    *,
+    wait: bool = True,
+    poll_interval: float = 30,
+    timeout: float = 24 * 3600,
+    **kwargs: Any,
+) -> Any:
+    """Async form of batched_completions, with the same arguments.
+
+    Each provider call runs in a worker thread and the wait between
+    status checks is an asyncio.sleep, so the event loop stays free.
+
+    Args:
+        model (str): OpenAI, Groq or Claude model name.
+        requests (List[dict]): completion arguments for each request.
+        wait (bool): Poll until the batch finishes; when False, return
+            a BatchJob at once.
+        poll_interval (float): Seconds between status checks.
+        timeout (float): Seconds to wait before raising Timeout.
+        **kwargs (Any): completion arguments shared by every request,
+            with a sync client as in batched_completions.
+
+    Returns:
+        Any: The results, or the BatchJob when wait is off.
+    """
+    import asyncio
+
+    from routehub.exceptions import Timeout
+
+    job = await asyncio.to_thread(
+        batched_completions, model, requests, wait=False, **kwargs
+    )
+    if not wait:
+        return job
+    deadline = time.monotonic() + timeout
+    while await asyncio.to_thread(job.status) not in _BATCH_DONE:
+        if time.monotonic() > deadline:
+            raise Timeout(
+                f"Batch {job.id} is still running after {timeout}s.",
+                job.provider,
+                model,
+            )
+        await asyncio.sleep(poll_interval)
+    return await asyncio.to_thread(job.results)

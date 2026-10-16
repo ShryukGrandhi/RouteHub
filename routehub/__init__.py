@@ -13,6 +13,7 @@ _LAZY = {
     "responses": "routehub.main",
     "aresponses": "routehub.main",
     "batched_completions": "routehub.batches",
+    "abatched_completions": "routehub.batches",
     "BatchJob": "routehub.batches",
     "get_reasoning_efforts": "routehub.main",
     "REASONING_EFFORTS": "routehub.main",

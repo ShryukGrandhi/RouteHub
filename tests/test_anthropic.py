@@ -453,6 +453,53 @@ class TestBuildRequest:
             5,
         )
 
+    def test_thinking_limits_sampling_and_forced_tool_choice(self):
+        turns = [{"role": "user", "content": "Go"}]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "a",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+        params = {
+            "reasoning_effort": "low",
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "tools": tools,
+            "tool_choice": "required",
+        }
+        body = build(turns, True, {"top_k": 5}, **params)
+        assert not {"temperature", "top_p", "top_k"} & body.keys()
+        assert body["tool_choice"] == {"type": "auto"}
+        with pytest.raises(
+            rh.UnsupportedParamsError,
+            match="temperature, top_p, top_k with thinking on",
+        ):
+            build(turns, False, {"top_k": 5}, **params)
+        with pytest.raises(
+            rh.UnsupportedParamsError, match="forced tool_choice"
+        ):
+            build(
+                turns,
+                reasoning_effort="low",
+                tools=tools,
+                tool_choice="required",
+            )
+        body = build(
+            turns, reasoning_effort="low", temperature=1, top_p=0.95
+        )
+        assert (body["temperature"], body["top_p"]) == (1.0, 0.95)
+        body = build(
+            turns,
+            extras={"thinking": {"type": "adaptive"}},
+            tools=tools,
+            tool_choice="required",
+        )
+        assert body["tool_choice"] == {"type": "any"}
+
     def test_extras_respect_drop_params(self):
         extras = {"top_k": 5, "unknown_field": 1}
         assert build(

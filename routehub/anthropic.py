@@ -488,31 +488,35 @@ def build_request(
             max_tokens = budget + 1024
     body["max_tokens"] = max_tokens
 
-    if _adaptive_thinking_only(model):
+    adaptive_only = _adaptive_thinking_only(model)
+    thinking_type = (thinking or {}).get("type")
+    if adaptive_only or thinking_type in ("enabled", "adaptive"):
         sampling = [
             key
-            for key, value in (
-                ("temperature", params.get("temperature")),
-                ("top_p", params.get("top_p")),
-                ("top_k", extras.get("top_k")),
+            for key, value, floor in (
+                ("temperature", params.get("temperature"), 1),
+                ("top_p", params.get("top_p"), 0.95),
+                ("top_k", extras.get("top_k"), None),
             )
             if value is not None
+            and (adaptive_only or floor is None or value < floor)
         ]
         if sampling and not drop_params:
             from routehub.exceptions import UnsupportedParamsError
 
             raise UnsupportedParamsError(
-                f"{model} does not accept {', '.join(sampling)}. "
+                f"{model} does not accept {', '.join(sampling)}"
+                f"{'' if adaptive_only else ' with thinking on'}. "
                 "Remove them or pass drop_params=True.",
                 llm_provider="anthropic",
                 model=model,
             )
         params = {
-            k: v
-            for k, v in params.items()
-            if k not in ("temperature", "top_p")
+            k: v for k, v in params.items() if k not in sampling
         }
-        extras = {k: v for k, v in extras.items() if k != "top_k"}
+        extras = {
+            k: v for k, v in extras.items() if k not in sampling
+        }
 
     temperature = params.get("temperature")
     if temperature is not None:
@@ -542,15 +546,17 @@ def build_request(
         params.get("tool_choice"), params.get("parallel_tool_calls")
     )
     if choice and tools:
+        always = _rejects_forced_tool_choice(model)
         if choice.get("type") in ("any", "tool") and (
-            _rejects_forced_tool_choice(model)
+            always or thinking_type == "enabled"
         ):
             if not drop_params:
                 from routehub.exceptions import UnsupportedParamsError
 
                 raise UnsupportedParamsError(
                     f"{model} does not accept a forced tool_choice "
-                    f"({params.get('tool_choice')!r}). Use "
+                    f"({params.get('tool_choice')!r})"
+                    f"{'' if always else ' with thinking on'}. Use "
                     "tool_choice='auto', or set drop_params=True to "
                     "send 'auto' instead.",
                     llm_provider="anthropic",

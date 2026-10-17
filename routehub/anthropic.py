@@ -188,6 +188,14 @@ def _file_block(part: dict) -> Optional[dict]:
         Optional[dict]: The Anthropic block, or None when it carries no data.
     """
     file = part.get("file") or {}
+    value = file.get("file_data") or file.get("file_id")
+    if isinstance(value, str) and value.startswith(
+        ("http://", "https://")
+    ):
+        return {
+            "type": "document",
+            "source": {"type": "url", "url": value},
+        }
     data = file.get("file_data")
     if data:
         media_type, payload = _parse_data_uri(data) or (

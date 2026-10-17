@@ -149,6 +149,43 @@ class TestBuildRequest:
             },
         }
 
+    def test_file_urls_become_url_document_sources(self):
+        url = "https://example.com/report.pdf"
+        body = build(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "file", "file": {"file_id": url}},
+                        {"type": "file", "file": {"file_data": url}},
+                        {
+                            "type": "file",
+                            "file": {"file_id": "file_011"},
+                        },
+                        {
+                            "type": "file",
+                            "file": {
+                                "file_data": "JVBERi0=",
+                                "file_id": url,
+                            },
+                        },
+                    ],
+                }
+            ]
+        )
+        assert [
+            b["source"] for b in body["messages"][0]["content"]
+        ] == [
+            {"type": "url", "url": url},
+            {"type": "url", "url": url},
+            {"type": "file", "file_id": "file_011"},
+            {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": "JVBERi0=",
+            },
+        ]
+
     def test_empty_text_blocks_are_dropped(self):
         body = build(
             [

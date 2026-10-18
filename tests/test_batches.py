@@ -324,3 +324,23 @@ class TestBatches:
         assert result.choices[0].message.content == "Hi"
         with pytest.raises(rh.BadRequestError, match="bad method"):
             job.results()
+
+    def test_claude_batch_is_gzipped_when_asked(self, mock_http):
+        client, recorder = mock_http(
+            httpx.Response(
+                200,
+                json={"id": "msgbatch_1", "processing_status": "x"},
+            )
+        )
+        job = rh.batched_completions(
+            model="claude-sonnet-4-6",
+            requests=[{"messages": USER}],
+            wait=False,
+            gzip=True,
+            client=client,
+        )
+        assert job.id == "msgbatch_1"
+        request = recorder.requests[0]
+        assert request.headers["content-encoding"] == "gzip"
+        submitted = recorder.last_json["requests"]
+        assert submitted[0]["params"]["model"] == "claude-sonnet-4-6"

@@ -1,5 +1,6 @@
 """Shared fixtures: isolated credentials, a fake OpenRouter catalog, mock HTTP."""
 
+import gzip
 import json
 
 import pytest
@@ -134,6 +135,7 @@ def fake_env(monkeypatch):
     """Clear real credentials, set fake ones, and reset every cache."""
     for name in _all_key_vars():
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("ROUTEHUB_GZIP_ON", raising=False)
     for name in FAKE_KEYS:
         monkeypatch.setenv(name, f"test-{name.lower()}")
     registry.clear_model_cache()
@@ -202,8 +204,12 @@ class Recorder:
 
     @property
     def last_json(self):
-        """The decoded body of the last request."""
-        return json.loads(self.requests[-1].content)
+        """The decoded body of the last request, gunzipped if needed."""
+        request = self.requests[-1]
+        content = request.content
+        if request.headers.get("content-encoding") == "gzip":
+            content = gzip.decompress(content)
+        return json.loads(content)
 
 
 def sse(events):

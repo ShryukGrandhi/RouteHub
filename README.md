@@ -297,6 +297,7 @@ Every setting is a parameter of the call; nothing is configured globally.
 | `drop_params` | `False` | Drop parameters a model rejects instead of sending them: sampling parameters on OpenAI reasoning models, `reasoning_effort` on models without reasoning, thinking on older Claude models, and unknown keyword arguments. |
 | `num_retries` | `None` | Retries on rate limits, 5xx errors and connection failures, with exponential backoff that honours `retry-after`. `None` means 2. |
 | `ssl_verify` | `True` | TLS verification, or a path to a corporate CA bundle. |
+| `gzip` | `None` | Gzip the request body sent to Claude's Messages API, which saves upload time on long histories. OpenAI-compatible providers always get an uncompressed body, because OpenAI rejects compressed ones. `None` reads `ROUTEHUB_GZIP_ON`. |
 | `set_verbose` | `False` | Print the provider, model, parameter names and timing to stderr. API keys and message content are never printed. |
 | `request_timeout` | `600.0` | Request timeout in seconds. `timeout=` overrides it. |
 
@@ -308,6 +309,7 @@ Also per call: `api_key`, `base_url` or `api_base`, `api_version` (Azure), `cust
 |---|---|
 | Provider keys and bases | See [Supported providers](#supported-providers). |
 | `ROUTEHUB_USE_ORJSON` | RouteHub uses `orjson` for JSON when it is installed (the `fast` extra). Set this to `0`, `false`, `no` or `off` to use the standard `json` module instead. Read once, on first use. |
+| `ROUTEHUB_GZIP_ON` | Set to `1`, `true`, `yes` or `on` to gzip Claude request bodies when a call doesn't pass `gzip=`. An explicit `gzip=False` still wins. Read on each call. |
 
 ## Error handling
 

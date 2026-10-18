@@ -83,6 +83,7 @@ _OPTIONS = (
     "num_retries",
     "ssl_verify",
     "keepalive_expiry",
+    "gzip",
     "set_verbose",
     "request_timeout",
     "timeout",
@@ -136,6 +137,7 @@ _RESPONSE_ONLY_KEYS = (
 _RETRYABLE_STATUS = frozenset(
     {408, 409, 429, 500, 502, 503, 504, 529}
 )
+_ON_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
 def get_reasoning_efforts() -> Tuple[str, ...]:
@@ -167,6 +169,7 @@ class _Call:
     max_retries: int
     ssl_verify: Union[bool, str]
     keepalive_expiry: float
+    gzip: bool
     timeout: Any
     verbose: bool
     client: Any
@@ -181,6 +184,24 @@ def _log(verbose: bool, message: str) -> None:
     """
     if verbose:
         print(f"routehub: {message}", file=sys.stderr)
+
+
+def _gzip_on(setting: Optional[bool]) -> bool:
+    """Decide whether to gzip Anthropic request bodies.
+
+    Args:
+        setting (Optional[bool]): The gzip argument; None defers to
+            the ROUTEHUB_GZIP_ON environment variable.
+
+    Returns:
+        bool: True when request bodies should be gzipped.
+    """
+    if setting is not None:
+        return bool(setting)
+    import os
+
+    value = os.environ.get("ROUTEHUB_GZIP_ON", "")
+    return value.strip().lower() in _ON_VALUES
 
 
 def _response_format_param(response_format: Any) -> Any:
@@ -340,6 +361,7 @@ def _build_call(
         max_retries=int(num_retries),
         ssl_verify=options["ssl_verify"],
         keepalive_expiry=options["keepalive_expiry"],
+        gzip=_gzip_on(options["gzip"]),
         timeout=timeout,
         verbose=bool(options["set_verbose"]),
         client=options["client"],
@@ -685,6 +707,32 @@ def _anthropic_prepare(call: _Call) -> Tuple[str, dict, dict, bool]:
     )
 
 
+def _anthropic_content(
+    headers: dict, body: dict, call: _Call
+) -> Tuple[dict, bytes]:
+    """Encode a Messages API body, gzipped when the call asks for it.
+
+    Args:
+        headers (dict): Request headers.
+        body (dict): Request body.
+        call (_Call): The resolved request.
+
+    Returns:
+        Tuple[dict, bytes]: The headers to send and the encoded body.
+    """
+    content = dumps(body)
+    if not call.gzip:
+        return headers, content
+    import gzip
+
+    # Level 1 keeps most of the size reduction at a fraction of the
+    # CPU time of the default level.
+    return (
+        {**headers, "content-encoding": "gzip"},
+        gzip.compress(content, compresslevel=1),
+    )
+
+
 def _anthropic_send(
     client: Any, url: str, headers: dict, body: dict, call: _Call
 ) -> Any:
@@ -705,6 +753,7 @@ def _anthropic_send(
     from routehub.exceptions import map_exception
 
     stream = bool(body.get("stream"))
+    headers, content = _anthropic_content(headers, body, call)
     attempt = 0
     while True:
         try:
@@ -712,7 +761,7 @@ def _anthropic_send(
                 "POST",
                 url,
                 headers=headers,
-                content=dumps(body),
+                content=content,
                 timeout=call.timeout,
             )
             response = client.send(request, stream=stream)
@@ -765,6 +814,7 @@ async def _anthropic_asend(
     from routehub.exceptions import map_exception
 
     stream = bool(body.get("stream"))
+    headers, content = _anthropic_content(headers, body, call)
     attempt = 0
     while True:
         try:
@@ -772,7 +822,7 @@ async def _anthropic_asend(
                 "POST",
                 url,
                 headers=headers,
-                content=dumps(body),
+                content=content,
                 timeout=call.timeout,
             )
             response = await client.send(request, stream=stream)
@@ -1087,6 +1137,7 @@ def completion(
     num_retries: Optional[int] = None,
     ssl_verify: Union[bool, str] = True,
     keepalive_expiry: float = 60.0,
+    gzip: Optional[bool] = None,
     set_verbose: bool = False,
     request_timeout: float = 600.0,
     timeout: Optional[Union[float, Any]] = None,
@@ -1145,6 +1196,9 @@ def completion(
             connection failures; 2 when omitted.
         ssl_verify (Union[bool, str]): TLS verification, or a CA bundle path.
         keepalive_expiry (float): Seconds an idle pooled connection stays open.
+        gzip (Optional[bool]): Gzip the request body sent to Claude's
+            Messages API; other providers get it uncompressed. None
+            reads ROUTEHUB_GZIP_ON (1, true, yes or on).
         set_verbose (bool): Print request and timing details to stderr.
         request_timeout (float): Request timeout in seconds.
         timeout (Optional[Union[float, Any]]): Request timeout; overrides
@@ -1234,6 +1288,7 @@ async def acompletion(
     num_retries: Optional[int] = None,
     ssl_verify: Union[bool, str] = True,
     keepalive_expiry: float = 60.0,
+    gzip: Optional[bool] = None,
     set_verbose: bool = False,
     request_timeout: float = 600.0,
     timeout: Optional[Union[float, Any]] = None,
@@ -1285,6 +1340,9 @@ async def acompletion(
         num_retries (Optional[int]): Retries on retryable failures.
         ssl_verify (Union[bool, str]): TLS verification, or a CA bundle path.
         keepalive_expiry (float): Seconds an idle pooled connection stays open.
+        gzip (Optional[bool]): Gzip the request body sent to Claude's
+            Messages API; other providers get it uncompressed. None
+            reads ROUTEHUB_GZIP_ON (1, true, yes or on).
         set_verbose (bool): Print request and timing details to stderr.
         request_timeout (float): Request timeout in seconds.
         timeout (Optional[Union[float, Any]]): Overrides request_timeout.

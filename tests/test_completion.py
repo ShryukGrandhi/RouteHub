@@ -340,9 +340,9 @@ class TestRequestShaping:
             {"type": "text", "text": "Sys"}
         ]
         assert "cache_control" not in body["tools"][0]
-        assert (
-            "cache_control" in messages[0]["content"][0]
-        ), "the caller's messages must not be mutated"
+        assert "cache_control" in messages[0]["content"][0], (
+            "the caller's messages must not be mutated"
+        )
 
     def test_cache_control_is_kept_for_openrouter(self, mock_openai):
         client, recorder = mock_openai(ok())
@@ -953,6 +953,18 @@ class TestSettings:
         client, _ = mock_openai(ok())
         rh.completion(model="gpt-4o", messages=USER, client=client)
         assert capsys.readouterr().err == ""
+
+    def test_gzip_leaves_openai_compatible_bodies_alone(
+        self, mock_openai, monkeypatch
+    ):
+        monkeypatch.setenv("ROUTEHUB_GZIP_ON", "1")
+        client, recorder = mock_openai(ok())
+        rh.completion(
+            model="gpt-4o", messages=USER, gzip=True, client=client
+        )
+        request = recorder.requests[0]
+        assert "content-encoding" not in request.headers
+        assert json.loads(request.content)["model"] == "gpt-4o"
 
 
 class TestClients:

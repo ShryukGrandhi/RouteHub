@@ -235,6 +235,7 @@ There are no module-level settings. `routehub.drop_params = True` sets an attrib
 | `ssl_verify` | `True` | TLS verification, or a path to a CA bundle. |
 | `request_timeout` / `timeout` | `600.0` / `None` | Seconds. `timeout` wins when set. |
 | `keepalive_expiry` | `60.0` | Seconds an idle pooled connection stays open. |
+| `gzip` | `None` | Gzip Claude request bodies; other providers are always sent uncompressed. `None` reads `ROUTEHUB_GZIP_ON` (`1`, `true`, `yes`, `on`). |
 | `set_verbose` | `False` | Provider, model, parameter names and timing to stderr. Never keys or message content. |
 | `client` | `None` | Your own client: `openai.OpenAI` / `AsyncOpenAI` for OpenAI-compatible providers, an httpx `Client` / `AsyncClient` for Claude. No API key is required, and the client's own TLS, pool and (for OpenAI SDK clients) retry settings apply. |
 

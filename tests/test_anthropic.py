@@ -1,5 +1,6 @@
 """The native Anthropic adapter: request, response and stream translation."""
 
+import gzip
 import json
 
 import openai
@@ -1370,3 +1371,84 @@ class TestCompletionThroughAnthropic:
             client=client,
         )
         assert response.choices[0].message.content == "Async"
+
+    def test_gzip_compresses_the_body_on_every_attempt(
+        self, mock_http
+    ):
+        client, recorder = mock_http(
+            httpx.Response(529, json={"error": {"type": "x"}}),
+            httpx.Response(
+                200,
+                json=message_response(
+                    [{"type": "text", "text": "Hi"}]
+                ),
+            ),
+        )
+        response = rh.completion(
+            model="claude-sonnet-4-6",
+            messages=messages(),
+            gzip=True,
+            client=client,
+        )
+        assert response.choices[0].message.content == "Hi"
+        assert len(recorder.requests) == 2
+        for request in recorder.requests:
+            assert request.headers["content-encoding"] == "gzip"
+            body = json.loads(gzip.decompress(request.content))
+            assert body["model"] == "claude-sonnet-4-6"
+
+    @pytest.mark.parametrize(
+        "env, argument, compressed",
+        [
+            (None, None, False),
+            ("1", None, True),
+            ("on", None, True),
+            ("0", None, False),
+            ("1", False, False),
+            (None, True, True),
+        ],
+    )
+    def test_gzip_argument_overrides_routehub_gzip_on(
+        self, mock_http, monkeypatch, env, argument, compressed
+    ):
+        if env is not None:
+            monkeypatch.setenv("ROUTEHUB_GZIP_ON", env)
+        client, recorder = mock_http(
+            httpx.Response(
+                200,
+                json=message_response(
+                    [{"type": "text", "text": "x"}]
+                ),
+            )
+        )
+        rh.completion(
+            model="claude-sonnet-4-6",
+            messages=messages(),
+            gzip=argument,
+            client=client,
+        )
+        encoding = recorder.requests[0].headers.get(
+            "content-encoding"
+        )
+        assert (encoding == "gzip") is compressed
+        assert recorder.last_json["model"] == "claude-sonnet-4-6"
+
+    async def test_async_gzip(self, mock_http):
+        client, recorder = mock_http(
+            httpx.Response(
+                200,
+                json=message_response(
+                    [{"type": "text", "text": "Async"}]
+                ),
+            ),
+            is_async=True,
+        )
+        await rh.acompletion(
+            model="claude-sonnet-4-6",
+            messages=messages(),
+            gzip=True,
+            client=client,
+        )
+        request = recorder.requests[0]
+        assert request.headers["content-encoding"] == "gzip"
+        assert recorder.last_json["model"] == "claude-sonnet-4-6"

@@ -1,13 +1,41 @@
 """Reusable SDK and HTTP clients, so connections stay pooled across calls."""
 
 import asyncio
+import os
 import threading
 from collections import OrderedDict
+from importlib.util import find_spec
 from typing import Any, Optional, Union
 
 _MAX_CLIENTS = 64
 _lock = threading.Lock()
 _clients: "OrderedDict[tuple, Any]" = OrderedDict()
+
+
+def _aiohttp_client_factory() -> Any:
+    """openai's aiohttp-backed async client, or None when unavailable.
+
+    Returns:
+        Any: The DefaultAioHttpClient class, or None to keep the httpx transport.
+    """
+    setting = os.environ.get("ROUTEHUB_USE_AIOHTTP", "")
+    if setting.strip().lower() in ("0", "false", "no", "off"):
+        return None
+    try:
+        import openai
+
+        factory = getattr(openai, "DefaultAioHttpClient", None)
+    except Exception:
+        return None
+    if factory is None:
+        return None
+    if find_spec("aiohttp") is None:
+        return None
+    return factory
+
+
+_aiohttp_factory: Any = _aiohttp_client_factory()
+USING_AIOHTTP = _aiohttp_factory is not None
 
 
 def _loop_id(is_async: bool) -> Optional[Any]:
@@ -97,6 +125,7 @@ def openai_client(
     Returns:
         Any: An OpenAI SDK client.
     """
+    aiohttp = _aiohttp_factory if is_async else None
     key = (
         "openai",
         provider == "azure",
@@ -109,16 +138,18 @@ def openai_client(
         max_retries,
         ssl_verify,
         keepalive_expiry,
+        aiohttp is not None,
     )
 
     def build() -> Any:
         import openai
 
-        factory = (
-            openai.DefaultAsyncHttpxClient
-            if is_async
-            else openai.DefaultHttpxClient
-        )
+        if aiohttp is not None:
+            factory = aiohttp
+        elif is_async:
+            factory = openai.DefaultAsyncHttpxClient
+        else:
+            factory = openai.DefaultHttpxClient
         http_client = factory(
             verify=ssl_verify, limits=_limits(keepalive_expiry)
         )
@@ -163,17 +194,25 @@ def http_client(
     Returns:
         Any: An httpx-compatible Client or AsyncClient.
     """
+    aiohttp = _aiohttp_factory if is_async else None
     key = (
         "http",
         is_async,
         _loop_id(is_async),
         ssl_verify,
         keepalive_expiry,
+        aiohttp is not None,
     )
 
     def build() -> Any:
         from routehub._http import httpx
 
+        if aiohttp is not None:
+            return aiohttp(
+                verify=ssl_verify,
+                follow_redirects=True,
+                limits=_limits(keepalive_expiry),
+            )
         cls = httpx.AsyncClient if is_async else httpx.Client
         return cls(
             verify=ssl_verify,

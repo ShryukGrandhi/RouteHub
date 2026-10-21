@@ -183,7 +183,7 @@ def build_request(
                 }
             }
         )
-    if specs:
+    if specs and params.get("tool_choice") != "none":
         body["toolConfig"] = {"tools": specs}
         choice = params.get("tool_choice")
         if choice == "auto":
@@ -446,7 +446,7 @@ def to_chat_completion(
         id=request_id,
         object="chat.completion",
         created=int(time.time()),
-        model=data.get("model") or model,
+        model=model,
         choices=[
             {
                 "index": 0,

@@ -422,6 +422,23 @@ class TestBedrockCompletion:
         )
         assert "toolConfig" not in recorder.last_json
 
+    def test_tool_choice_none_omits_tool_config(self, mock_http):
+        client, recorder = mock_http(reply())
+        rh.completion(
+            model="bedrock/anthropic.claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hello"}],
+            api_key="bk-1",
+            client=client,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                }
+            ],
+            tool_choice="none",
+        )
+        assert "toolConfig" not in recorder.last_json
+
     def test_unsupported_param_raises_unless_dropped(self, mock_http):
         client, recorder = mock_http(reply())
         with pytest.raises(BadRequestError) as err:

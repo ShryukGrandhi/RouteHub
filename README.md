@@ -85,7 +85,7 @@ response = asyncio.run(
 
 | Feature | What it means |
 |---|---|
-| **One API, every major provider** | OpenAI, Anthropic, Gemini, Groq, xAI, DeepSeek, OpenRouter, Together, Mistral, Fireworks, Azure OpenAI, Ollama, vLLM and any OpenAI-compatible server. Requests use the OpenAI chat format, and every response is the OpenAI SDK's own `ChatCompletion`, `ChatCompletionChunk` or `CreateEmbeddingResponse`. |
+| **One API, every major provider** | OpenAI, Anthropic, AWS Bedrock, Gemini, Groq, xAI, DeepSeek, OpenRouter, Together, Mistral, Fireworks, Azure OpenAI, Ollama, vLLM and any OpenAI-compatible server. Requests use the OpenAI chat format, and every response is the OpenAI SDK's own `ChatCompletion`, `ChatCompletionChunk` or `CreateEmbeddingResponse`. |
 | **Built on the official OpenAI SDK** | Retries, timeouts, connection pooling and response types come from OpenAI's client rather than a reimplementation. Works with openai 2.x and 3.x. |
 | **First-class Claude support** | Anthropic's OpenAI-compatible endpoint drops prompt caching, thinking output and cached-token usage, so RouteHub calls Claude's native Messages API and translates both ways. `cache_control` markers, extended thinking, tool use, images, PDFs and cached-token accounting all work. |
 | **No global state** | Retries, TLS verification, timeouts and parameter dropping are arguments to each call. One tenant's `ssl_verify=False` or retry policy never leaks into another's, which matters when many teams or agents share a process. |
@@ -319,7 +319,7 @@ Bedrock models are called through the Converse API with `bedrock/` model strings
 - A Bedrock API key: `BEDROCK_API_KEY` or `api_key=`, sent as `Authorization: Bearer`.
 - AWS credentials from the environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`), signing each request with SigV4. No extra dependency; profile and instance-role chains need `botocore` and are not read.
 
-The region comes from `AWS_REGION` or `AWS_DEFAULT_REGION`, or per call as `aws_region=`. Cross-region inference profile ids work as model names. Non-streaming calls, tool use and usage (including Claude cache read and write tokens) are supported; streaming raises a clear error for now.
+The region comes from `AWS_REGION` or `AWS_DEFAULT_REGION`, or per call as `aws_region=`. Cross-region inference profile ids work as model names. Non-streaming calls, tool use and usage (including Claude cache read and write tokens) are supported; streaming raises a clear error for now. Parameters beyond `max_tokens`/`max_completion_tokens`, `temperature`, `top_p`, `stop`, `tools` and `tool_choice` (for example `response_format`) raise `BadRequestError` unless `drop_params=True`.
 
 ```python
 routehub.completion(

@@ -1147,7 +1147,9 @@ class TestAiohttpTransport:
         from routehub import clients
 
         monkeypatch.setenv("ROUTEHUB_USE_AIOHTTP", "0")
-        monkeypatch.setattr(clients, "find_spec", lambda name: object())
+        monkeypatch.setattr(
+            clients, "find_spec", lambda name: object()
+        )
         assert clients._aiohttp_client_factory() is None
 
     def test_missing_aiohttp_install_disables_the_factory(
@@ -1159,7 +1161,9 @@ class TestAiohttpTransport:
         monkeypatch.setattr(
             clients,
             "find_spec",
-            lambda name: None if name == "httpx_aiohttp" else object(),
+            lambda name: (
+                None if name == "httpx_aiohttp" else object()
+            ),
         )
         assert clients._aiohttp_client_factory() is None
 

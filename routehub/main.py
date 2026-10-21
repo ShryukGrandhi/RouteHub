@@ -1686,6 +1686,14 @@ def _responses_request(
         raise NotImplementedError("mock_response is not supported")
     input = kwargs.get("input")
     call = _build_call(model, [input], {}, options, kwargs)
+    if call.provider == "bedrock":
+        from routehub.exceptions import BadRequestError
+
+        raise BadRequestError(
+            "bedrock has no Responses API; use completion.",
+            llm_provider="bedrock",
+            model=model,
+        )
     resource = _openai_client(call, is_async).responses
     request = {**call.extras, "model": call.bare}
     if kwargs.get("metadata") is not None:

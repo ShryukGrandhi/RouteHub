@@ -1,8 +1,17 @@
+import time
+import types
+
 import pytest
 
 import routehub as rh
 from routehub import bedrock
 from routehub._http import httpx
+from routehub.exceptions import BadRequestError
+
+
+@pytest.fixture(autouse=True)
+def aws_region_env(monkeypatch):
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
 
 
 def converse_body(**over):
@@ -45,8 +54,8 @@ class TestBedrockCompletion:
             client=client,
         )
         request = recorder.requests[0]
-        assert request.headers["x-api-key"] == "bk-1"
-        assert "authorization" not in request.headers
+        assert request.headers["authorization"] == "Bearer bk-1"
+        assert "x-api-key" not in request.headers
         assert (
             request.url.host
             == "bedrock-runtime.us-east-1.amazonaws.com"
@@ -65,9 +74,9 @@ class TestBedrockCompletion:
             api_key="bk-1",
             client=client,
         )
-        assert result.usage.prompt_tokens == 5
+        assert result.usage.prompt_tokens == 9
         assert result.usage.completion_tokens == 2
-        assert result.usage.total_tokens == 7
+        assert result.usage.total_tokens == 11
         assert result.usage.cache_read_input_tokens == 3
         assert result.usage.cache_creation_input_tokens == 1
 
@@ -229,7 +238,10 @@ class TestBedrockCompletion:
             client=client,
         )
         assert result.choices[0].message.content == "hi there"
-        assert recorder.requests[0].headers["x-api-key"] == "bk-1"
+        assert (
+            recorder.requests[0].headers["authorization"]
+            == "Bearer bk-1"
+        )
 
     def test_no_credentials_raise_authentication_error(
         self, mock_http, monkeypatch
@@ -287,6 +299,198 @@ class TestBedrockCompletion:
                 client=client,
             )
 
+    def test_responses_api_rejected_before_any_request(
+        self, mock_openai
+    ):
+        client, recorder = mock_openai(reply())
+        with pytest.raises(BadRequestError):
+            rh.responses(
+                model="bedrock/amazon.nova-lite-v1",
+                input="hi",
+                api_key="bk-1",
+                client=client,
+            )
+        assert recorder.requests == []
+
+    def test_parallel_tool_results_share_one_user_turn(
+        self, mock_http
+    ):
+        client, recorder = mock_http(reply())
+        rh.completion(
+            model="bedrock/anthropic.claude-sonnet-4-6",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "weather in Paris and Rome?",
+                },
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "t-1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": '{"city": "Paris"}',
+                            },
+                        },
+                        {
+                            "id": "t-2",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": '{"city": "Rome"}',
+                            },
+                        },
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "t-1",
+                    "content": "sunny",
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "t-2",
+                    "content": "rainy",
+                },
+                {"role": "user", "content": "thanks"},
+            ],
+            api_key="bk-1",
+            client=client,
+        )
+        messages = recorder.last_json["messages"]
+        assert [m["role"] for m in messages] == [
+            "user",
+            "assistant",
+            "user",
+        ]
+        results = messages[2]["content"]
+        assert len(results) == 3
+        assert results[1]["toolResult"]["toolUseId"] == "t-2"
+        assert results[2] == {"text": "thanks"}
+
+    def test_developer_and_list_system_content(self, mock_http):
+        client, recorder = mock_http(reply())
+        rh.completion(
+            model="bedrock/anthropic.claude-sonnet-4-6",
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Be brief."}
+                    ],
+                },
+                {"role": "developer", "content": "Use metric."},
+                {"role": "user", "content": "hello"},
+            ],
+            api_key="bk-1",
+            client=client,
+        )
+        body = recorder.last_json
+        assert body["system"] == [
+            {"text": "Be brief."},
+            {"text": "Use metric."},
+        ]
+        assert body["messages"] == [
+            {"role": "user", "content": [{"text": "hello"}]}
+        ]
+
+    def test_stop_string_and_max_completion_tokens(self, mock_http):
+        client, recorder = mock_http(reply())
+        rh.completion(
+            model="bedrock/anthropic.claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hello"}],
+            api_key="bk-1",
+            client=client,
+            stop="END",
+            max_completion_tokens=50,
+        )
+        assert recorder.last_json["inferenceConfig"] == {
+            "maxTokens": 50,
+            "stopSequences": ["END"],
+        }
+
+    def test_tool_choice_without_tools_is_ignored(self, mock_http):
+        client, recorder = mock_http(reply())
+        rh.completion(
+            model="bedrock/anthropic.claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hello"}],
+            api_key="bk-1",
+            client=client,
+            tool_choice="auto",
+        )
+        assert "toolConfig" not in recorder.last_json
+
+    def test_unsupported_param_raises_unless_dropped(self, mock_http):
+        client, recorder = mock_http(reply())
+        with pytest.raises(BadRequestError) as err:
+            rh.completion(
+                model="bedrock/anthropic.claude-sonnet-4-6",
+                messages=[{"role": "user", "content": "hello"}],
+                api_key="bk-1",
+                client=client,
+                response_format={"type": "json_object"},
+            )
+        assert "response_format" in str(err.value)
+        assert recorder.requests == []
+        result = rh.completion(
+            model="bedrock/anthropic.claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hello"}],
+            api_key="bk-1",
+            client=client,
+            response_format={"type": "json_object"},
+            drop_params=True,
+        )
+        assert result.choices[0].message.content == "hi there"
+
+    def test_missing_region_is_a_clear_error(
+        self, mock_http, monkeypatch
+    ):
+        monkeypatch.delenv("AWS_REGION")
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        client, recorder = mock_http(reply())
+        with pytest.raises(BadRequestError) as err:
+            rh.completion(
+                model="bedrock/amazon.nova-lite-v1",
+                messages=[{"role": "user", "content": "hi"}],
+                api_key="bk-1",
+                client=client,
+            )
+        assert "AWS_REGION" in str(err.value)
+        assert recorder.requests == []
+
+    def test_retry_is_signed_with_a_fresh_clock(
+        self, mock_http, monkeypatch
+    ):
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        ticks = iter([0, 3600])
+        monkeypatch.setattr(
+            bedrock,
+            "time",
+            types.SimpleNamespace(
+                strftime=time.strftime,
+                gmtime=lambda: time.gmtime(next(ticks)),
+                time=time.time,
+                sleep=time.sleep,
+            ),
+        )
+        client, recorder = mock_http(
+            reply(status=503, body={"message": "busy"}), reply()
+        )
+        rh.completion(
+            model="bedrock/amazon.nova-lite-v1",
+            messages=[{"role": "user", "content": "hi"}],
+            client=client,
+            num_retries=1,
+        )
+        first, second = recorder.requests
+        assert (
+            first.headers["x-amz-date"]
+            != second.headers["x-amz-date"]
+        )
+
 
 class TestSigV4:
     def test_signature_is_deterministic(self):
@@ -337,6 +541,24 @@ class TestSigV4:
         assert result.choices[0].message.content == "hi there"
         auth = recorder.requests[0].headers["authorization"]
         assert auth.startswith("AWS4-HMAC-SHA256")
+
+    def test_colon_model_id_matches_aws_signature(self):
+        headers = bedrock.sigv4_headers(
+            "POST",
+            "https://bedrock-runtime.us-east-1.amazonaws.com"
+            "/model/anthropic.claude-3-5-sonnet-20240620-v1%3A0/converse",
+            b'{"modelId": "anthropic.claude-3-5-sonnet-20240620-v1:0"}',
+            "us-east-1",
+            "AKIDEXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            amz_date="20260101T000000Z",
+        )
+        assert headers["authorization"] == (
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/"
+            "us-east-1/bedrock/aws4_request, "
+            "SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
+            "Signature=0e39903b089c85eec3562677e9fdc9edb62ec203a23905352b5dc92af75af5dc"
+        )
 
     def test_converse_url_quotes_model_ids(self):
         url = bedrock.converse_url(

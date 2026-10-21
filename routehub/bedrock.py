@@ -1,7 +1,7 @@
 """AWS Bedrock support through the Converse API.
 
 Requests are signed with SigV4 from the standard AWS environment
-variables, or sent with a Bedrock API key as a bearer-style x-api-key
+variables, or sent with a Bedrock API key as an Authorization: Bearer
 header. Responses come back as OpenAI SDK objects, like the native
 Anthropic adapter.
 """
@@ -17,9 +17,23 @@ _SERVICE = "bedrock"
 _DUMMY_KEYS = ("", "bedrock")
 _INFERENCE_MAP = {
     "max_tokens": "maxTokens",
+    "max_completion_tokens": "maxTokens",
     "temperature": "temperature",
     "top_p": "topP",
 }
+_SUPPORTED_PARAMS = frozenset(
+    {
+        "stream",
+        "aws_region",
+        "max_tokens",
+        "max_completion_tokens",
+        "temperature",
+        "top_p",
+        "stop",
+        "tools",
+        "tool_choice",
+    }
+)
 _STOP_REASONS = {
     "end_turn": "stop",
     "stop_sequence": "stop",
@@ -44,17 +58,12 @@ def _content_blocks(content: Any) -> List[dict]:
         return [{"text": content}] if content else []
     blocks = []
     for part in content:
-        if not isinstance(part, dict):
-            blocks.append({"text": str(part)})
-        elif part.get("type") == "text":
-            blocks.append({"text": part.get("text", "")})
-        elif part.get("type") == "image_url":
+        if part.get("type") != "text":
             raise ValueError(
-                "Bedrock image parts are not supported yet; "
+                "Bedrock supports text content parts only; "
                 "send images through the Anthropic or OpenAI path"
             )
-        elif part.get("text") is not None:
-            blocks.append({"text": str(part.get("text"))})
+        blocks.append({"text": part.get("text", "")})
     return blocks
 
 
@@ -96,17 +105,12 @@ def _tool_use_blocks(tool_calls: List[dict]) -> List[dict]:
     blocks = []
     for call in tool_calls:
         fn = call.get("function") or {}
-        raw = fn.get("arguments") or "{}"
-        try:
-            parsed = json.loads(raw) if isinstance(raw, str) else raw
-        except ValueError:
-            parsed = {"_raw": raw}
         blocks.append(
             {
                 "toolUse": {
                     "toolUseId": call.get("id"),
                     "name": fn.get("name"),
-                    "input": parsed or {},
+                    "input": json.loads(fn.get("arguments") or "{}"),
                 }
             }
         )
@@ -117,7 +121,6 @@ def build_request(
     bare: str,
     messages: List[dict],
     params: Dict[str, Any],
-    extras: Dict[str, Any],
 ) -> dict:
     """Build a Converse request body from an OpenAI chat request.
 
@@ -125,37 +128,29 @@ def build_request(
         bare (str): The bare Bedrock model id.
         messages (List[dict]): OpenAI chat messages.
         params (Dict[str, Any]): OpenAI request parameters.
-        extras (Dict[str, Any]): Extra gateway options.
 
     Returns:
         dict: The Converse request body.
     """
     body: Dict[str, Any] = {"modelId": bare}
     out: List[dict] = []
-    system = []
+    system: List[dict] = []
     for message in messages:
         role = message.get("role", "user")
-        if role == "system":
-            system.append({"text": message.get("content") or ""})
+        if role in ("system", "developer"):
+            system.extend(_content_blocks(message.get("content")))
             continue
         if role == "tool":
-            out.append(
-                {"role": "user", "content": _tool_result(message)}
-            )
-            continue
-        blocks = _content_blocks(message.get("content"))
-        calls = message.get("tool_calls")
-        if calls:
-            blocks.extend(_tool_use_blocks(calls))
-        out.append(
-            {
-                "role": "assistant"
-                if role == "assistant"
-                else "user",
-                "content": blocks
-                or [{"text": message.get("content") or ""}],
-            }
-        )
+            role, blocks = "user", _tool_result(message)
+        else:
+            blocks = _content_blocks(message.get("content"))
+            if message.get("tool_calls"):
+                blocks.extend(_tool_use_blocks(message["tool_calls"]))
+            role = "assistant" if role == "assistant" else "user"
+        if out and out[-1]["role"] == role:
+            out[-1]["content"].extend(blocks)
+        else:
+            out.append({"role": role, "content": blocks})
     if system:
         body["system"] = system
     body["messages"] = out
@@ -164,7 +159,10 @@ def build_request(
         if params.get(name) is not None:
             config[target] = params[name]
     if params.get("stop"):
-        config["stopSequences"] = params["stop"]
+        stop = params["stop"]
+        config["stopSequences"] = (
+            [stop] if isinstance(stop, str) else stop
+        )
     if config:
         body["inferenceConfig"] = config
     tools = params.get("tools") or []
@@ -187,8 +185,7 @@ def build_request(
         )
     if specs:
         body["toolConfig"] = {"tools": specs}
-    if params.get("tool_choice"):
-        choice = params["tool_choice"]
+        choice = params.get("tool_choice")
         if choice == "auto":
             body["toolConfig"]["toolChoice"] = {"auto": {}}
         elif choice == "required":
@@ -222,30 +219,24 @@ def region_for(extras: Dict[str, Any]) -> Optional[str]:
 
 def converse_url(
     api_base: Optional[str],
-    region: Optional[str],
+    region: str,
     bare: str,
-    path: str = "converse",
 ) -> str:
     """Build the Converse endpoint URL.
 
     Args:
         api_base (Optional[str]): Explicit base URL override.
-        region (Optional[str]): AWS region for the default endpoint.
+        region (str): AWS region for the default endpoint.
         bare (str): The bare Bedrock model id.
-        path (str): Endpoint name under the model.
 
     Returns:
         str: The full URL.
     """
-    base = api_base
-    if not base:
-        base = (
-            f"https://bedrock-runtime.{region}.amazonaws.com"
-            if region
-            else "https://bedrock-runtime.amazonaws.com"
-        )
+    base = (
+        api_base or f"https://bedrock-runtime.{region}.amazonaws.com"
+    )
     model = quote(bare, safe="")
-    return f"{base.rstrip('/')}/model/{model}/{path}"
+    return f"{base.rstrip('/')}/model/{model}/converse"
 
 
 def _hmac(key: bytes, message: str) -> bytes:
@@ -281,7 +272,7 @@ def sigv4_headers(
     date = now[:8]
     split = urlsplit(url)
     host = split.netloc
-    canonical_uri = quote(split.path, safe="/%")
+    canonical_uri = quote(split.path, safe="/")
     payload_hash = hashlib.sha256(body).hexdigest()
     headers = {
         "host": host,
@@ -358,7 +349,7 @@ def auth_headers(
     extra = dict(call.extra_headers or {})
     if call.api_key and call.api_key not in _DUMMY_KEYS:
         headers = {
-            "x-api-key": call.api_key,
+            "authorization": f"Bearer {call.api_key}",
             "content-type": "application/json",
         }
         headers.update(extra)
@@ -392,32 +383,36 @@ def _usage(raw: Optional[dict]) -> dict:
         raw (Optional[dict]): Converse usage block.
 
     Returns:
-        dict: OpenAI-shaped usage, with Bedrock cache counts alongside.
+        dict: OpenAI-shaped usage, with prompt tokens including cache reads
+        and writes, and the Anthropic cache counts kept alongside.
     """
     raw = raw or {}
-    prompt = raw.get("inputTokens") or 0
+    cache_read = raw.get("cacheReadInputTokens") or 0
+    cache_write = raw.get("cacheWriteInputTokens") or 0
+    prompt = (raw.get("inputTokens") or 0) + cache_read + cache_write
     completion = raw.get("outputTokens") or 0
-    usage = {
+    return {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
-        "total_tokens": raw.get("totalTokens")
-        or (prompt + completion),
+        "total_tokens": prompt + completion,
+        "prompt_tokens_details": {
+            "cached_tokens": cache_read,
+            "cache_creation_tokens": cache_write,
+        },
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
     }
-    if raw.get("cacheReadInputTokens") is not None:
-        usage["cache_read_input_tokens"] = raw["cacheReadInputTokens"]
-    if raw.get("cacheWriteInputTokens") is not None:
-        usage["cache_creation_input_tokens"] = raw[
-            "cacheWriteInputTokens"
-        ]
-    return usage
 
 
-def to_chat_completion(data: dict, model: str) -> Any:
+def to_chat_completion(
+    data: dict, model: str, request_id: Optional[str]
+) -> Any:
     """Convert a Converse response into an OpenAI ChatCompletion.
 
     Args:
         data (dict): The decoded Converse response.
         model (str): Model name to report when the response omits it.
+        request_id (Optional[str]): The x-amzn-requestid response header.
 
     Returns:
         ChatCompletion: The OpenAI SDK response object.
@@ -448,9 +443,7 @@ def to_chat_completion(data: dict, model: str) -> Any:
     if finish == "tool_calls" and not tool_calls:
         finish = "stop"
     return ChatCompletion.model_construct(
-        id=data.get("ResponseMetadata", {}).get(
-            "RequestId", "bedrock"
-        ),
+        id=request_id,
         object="chat.completion",
         created=int(time.time()),
         model=data.get("model") or model,
@@ -504,25 +497,46 @@ def response_error(response: Any, model: str) -> Exception:
     )
 
 
-def _prepare(call: Any) -> Tuple[str, dict, bytes]:
-    """Build the URL, headers and encoded body for one call.
+def _prepare(call: Any) -> Tuple[str, bytes, str]:
+    """Build the URL and encoded body for one call.
 
     Args:
         call (Any): The resolved request.
 
     Returns:
-        Tuple[str, dict, bytes]: URL, headers and body bytes.
+        Tuple[str, bytes, str]: URL, body bytes and region.
     """
+    from routehub.exceptions import BadRequestError
+
     region = region_for(call.extras)
-    body = build_request(
-        call.bare, call.messages, call.params, call.extras
+    if not region:
+        raise BadRequestError(
+            "Bedrock needs a region: set AWS_REGION or AWS_DEFAULT_REGION, "
+            "or pass aws_region=",
+            llm_provider="bedrock",
+            model=call.model,
+        )
+    rejected = sorted(
+        name
+        for name, value in {**call.params, **call.extras}.items()
+        if value is not None and name not in _SUPPORTED_PARAMS
     )
+    if rejected and not call.drop_params:
+        raise BadRequestError(
+            f"Bedrock does not support {', '.join(rejected)}; "
+            "pass drop_params=True to ignore them",
+            llm_provider="bedrock",
+            model=call.model,
+        )
+    body = build_request(call.bare, call.messages, call.params)
     if call.extra_body:
         body.update(call.extra_body)
     content = json.dumps(body).encode()
-    url = converse_url(call.api_base, region, call.bare)
-    headers = auth_headers(call, "POST", url, content, region or "")
-    return url, headers, content
+    return (
+        converse_url(call.api_base, region, call.bare),
+        content,
+        region,
+    )
 
 
 def complete(call: Any, client: Any) -> Any:
@@ -543,9 +557,10 @@ def complete(call: Any, client: Any) -> Any:
         _retry_delay,
     )
 
-    url, headers, content = _prepare(call)
+    url, content, region = _prepare(call)
     attempt = 0
     while True:
+        headers = auth_headers(call, "POST", url, content, region)
         try:
             response = client.post(
                 url,
@@ -565,7 +580,11 @@ def complete(call: Any, client: Any) -> Any:
                 error, call.provider, call.model
             ) from error
         if response.status_code < 400:
-            return to_chat_completion(response.json(), call.model)
+            return to_chat_completion(
+                response.json(),
+                call.model,
+                response.headers.get("x-amzn-requestid"),
+            )
         if (
             response.status_code in _RETRYABLE_STATUS
             and attempt < call.max_retries
@@ -600,9 +619,10 @@ async def acomplete(call: Any, client: Any) -> Any:
         _retry_delay,
     )
 
-    url, headers, content = _prepare(call)
+    url, content, region = _prepare(call)
     attempt = 0
     while True:
+        headers = auth_headers(call, "POST", url, content, region)
         try:
             response = await client.post(
                 url,
@@ -622,7 +642,11 @@ async def acomplete(call: Any, client: Any) -> Any:
                 error, call.provider, call.model
             ) from error
         if response.status_code < 400:
-            return to_chat_completion(response.json(), call.model)
+            return to_chat_completion(
+                response.json(),
+                call.model,
+                response.headers.get("x-amzn-requestid"),
+            )
         if (
             response.status_code in _RETRYABLE_STATUS
             and attempt < call.max_retries

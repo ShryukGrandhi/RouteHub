@@ -29,7 +29,7 @@ def _aiohttp_client_factory() -> Any:
         return None
     if factory is None:
         return None
-    if find_spec("aiohttp") is None:
+    if find_spec("httpx_aiohttp") is None:
         return None
     return factory
 

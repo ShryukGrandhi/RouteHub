@@ -1143,29 +1143,40 @@ class _RecordingAsyncClient(httpx.AsyncClient):
 
 
 class TestAiohttpTransport:
+    def _unresolved(self, clients):
+        clients._aiohttp_resolved = False
+        clients._aiohttp_factory = None
+
     def test_env_off_disables_the_aiohttp_factory(self, monkeypatch):
         from routehub import clients
 
+        self._unresolved(clients)
         monkeypatch.setenv("ROUTEHUB_USE_AIOHTTP", "0")
         monkeypatch.setattr(
             clients, "find_spec", lambda name: object()
         )
-        assert clients._aiohttp_client_factory() is None
+        assert clients._resolve_aiohttp_factory() is None
 
     def test_missing_aiohttp_install_disables_the_factory(
         self, monkeypatch
     ):
         from routehub import clients
 
+        self._unresolved(clients)
+        monkeypatch.setenv("ROUTEHUB_USE_AIOHTTP", "1")
+        monkeypatch.setattr(clients, "find_spec", lambda name: None)
+        assert clients._resolve_aiohttp_factory() is None
+
+    def test_openai_before_3_disables_the_factory(self, monkeypatch):
+        from routehub import clients
+
+        self._unresolved(clients)
         monkeypatch.setenv("ROUTEHUB_USE_AIOHTTP", "1")
         monkeypatch.setattr(
-            clients,
-            "find_spec",
-            lambda name: (
-                None if name == "httpx_aiohttp" else object()
-            ),
+            clients, "find_spec", lambda name: object()
         )
-        assert clients._aiohttp_client_factory() is None
+        monkeypatch.setattr(openai, "__version__", "2.48.0")
+        assert clients._resolve_aiohttp_factory() is None
 
     async def test_async_http_client_uses_the_factory_when_set(
         self, monkeypatch
@@ -1176,6 +1187,7 @@ class TestAiohttpTransport:
         monkeypatch.setattr(
             clients, "_aiohttp_factory", _RecordingAsyncClient
         )
+        monkeypatch.setattr(clients, "_aiohttp_resolved", True)
         native = clients.http_client(is_async=True, ssl_verify=True)
         assert isinstance(native, _RecordingAsyncClient)
         assert native.captured["follow_redirects"] is True
@@ -1190,6 +1202,7 @@ class TestAiohttpTransport:
         monkeypatch.setattr(
             clients, "_aiohttp_factory", _RecordingAsyncClient
         )
+        monkeypatch.setattr(clients, "_aiohttp_resolved", True)
         sdk = clients.openai_client(
             "openai",
             "k",
@@ -1209,6 +1222,7 @@ class TestAiohttpTransport:
 
         clients._clients.clear()
         monkeypatch.setattr(clients, "_aiohttp_factory", None)
+        monkeypatch.setattr(clients, "_aiohttp_resolved", True)
         plain = clients.http_client(is_async=True, ssl_verify=True)
         monkeypatch.setattr(
             clients, "_aiohttp_factory", _RecordingAsyncClient
@@ -1225,6 +1239,7 @@ class TestAiohttpTransport:
         monkeypatch.setattr(
             clients, "_aiohttp_factory", _RecordingAsyncClient
         )
+        monkeypatch.setattr(clients, "_aiohttp_resolved", True)
         native = clients.http_client(is_async=False, ssl_verify=True)
         sdk = clients.openai_client(
             "openai",

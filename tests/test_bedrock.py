@@ -4,6 +4,7 @@ import types
 
 import pytest
 
+import routehub as rh
 from routehub import bedrock
 from routehub._http import httpx
 from routehub.exceptions import BadRequestError
@@ -458,3 +459,171 @@ class TestSigV4:
             "https://bedrock-runtime.us-east-1.amazonaws.com"
             "/model/anthropic.claude-3-5-sonnet-v1%3A0/converse"
         )
+
+
+class TestRouting:
+    def chat(self, client, **kwargs):
+        return rh.completion(
+            model="bedrock/amazon.nova-lite-v1",
+            messages=[{"role": "user", "content": "hi"}],
+            client=client,
+            **{"api_key": "bk-1", **kwargs},
+        )
+
+    def test_bearer_key_reaches_converse(self, mock_http):
+        client, recorder = mock_http(reply())
+        result = rh.completion(
+            model="bedrock/anthropic.claude-sonnet-4-6",
+            messages=[{"role": "user", "content": "hello"}],
+            api_key="bk-1",
+            client=client,
+            max_tokens=128,
+        )
+        request = recorder.requests[0]
+        assert request.headers["authorization"] == "Bearer bk-1"
+        assert "x-api-key" not in request.headers
+        assert (
+            request.url.host
+            == "bedrock-runtime.us-east-1.amazonaws.com"
+        )
+        assert request.url.path.startswith(
+            "/model/anthropic.claude-sonnet-4-6/converse"
+        )
+        assert recorder.last_json["inferenceConfig"] == {
+            "maxTokens": 128
+        }
+        assert result.choices[0].message.content == "hi there"
+        assert result.usage.prompt_tokens == 9
+
+    def test_sigv4_used_without_an_api_key(
+        self, mock_http, monkeypatch
+    ):
+        monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        client, recorder = mock_http(reply())
+        result = rh.completion(
+            model="bedrock/amazon.nova-lite-v1",
+            messages=[{"role": "user", "content": "hi"}],
+            client=client,
+        )
+        assert result.choices[0].message.content == "hi there"
+        auth = recorder.requests[0].headers["authorization"]
+        assert auth.startswith("AWS4-HMAC-SHA256")
+
+    async def test_acompletion_awaits_the_same_request(
+        self, mock_http
+    ):
+        client, recorder = mock_http(reply(), is_async=True)
+        result = await rh.acompletion(
+            model="bedrock/amazon.nova-lite-v1",
+            messages=[{"role": "user", "content": "hello"}],
+            api_key="bk-1",
+            client=client,
+        )
+        assert result.choices[0].message.content == "hi there"
+        assert (
+            recorder.requests[0].headers["authorization"]
+            == "Bearer bk-1"
+        )
+
+    def test_region_comes_from_env_and_aws_region(
+        self, mock_http, monkeypatch
+    ):
+        monkeypatch.setenv("AWS_REGION", "eu-central-1")
+        client, recorder = mock_http(reply(), reply())
+        self.chat(client)
+        self.chat(client, aws_region="ap-south-1")
+        hosts = [r.url.host for r in recorder.requests]
+        assert hosts == [
+            "bedrock-runtime.eu-central-1.amazonaws.com",
+            "bedrock-runtime.ap-south-1.amazonaws.com",
+        ]
+
+    def test_missing_region_is_a_clear_error(
+        self, mock_http, monkeypatch
+    ):
+        monkeypatch.delenv("AWS_REGION")
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        client, recorder = mock_http(reply())
+        with pytest.raises(BadRequestError) as err:
+            self.chat(client)
+        assert "AWS_REGION" in str(err.value)
+        assert recorder.requests == []
+
+    def test_error_status_maps_to_exception(self, mock_http):
+        client, _ = mock_http(
+            reply(status=400, body={"message": "bad model"})
+        )
+        with pytest.raises(BadRequestError) as err:
+            self.chat(client, num_retries=0)
+        assert "bad model" in str(err.value)
+
+    def test_unsupported_param_raises_unless_dropped(self, mock_http):
+        client, recorder = mock_http(reply())
+        fmt = {"type": "json_object"}
+        with pytest.raises(BadRequestError) as err:
+            self.chat(client, response_format=fmt)
+        assert "response_format" in str(err.value)
+        assert recorder.requests == []
+        result = self.chat(
+            client, response_format=fmt, drop_params=True
+        )
+        assert result.choices[0].message.content == "hi there"
+
+    def test_num_retries_re_signs_each_attempt(
+        self, mock_http, monkeypatch
+    ):
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+        ticks = iter([0, 3600])
+        monkeypatch.setattr(
+            bedrock,
+            "time",
+            types.SimpleNamespace(
+                strftime=time.strftime,
+                gmtime=lambda: time.gmtime(next(ticks)),
+                time=time.time,
+                sleep=time.sleep,
+            ),
+        )
+        client, recorder = mock_http(
+            reply(status=503, body={"message": "busy"}), reply()
+        )
+        self.chat(client, api_key="bedrock", num_retries=1)
+        first, second = recorder.requests
+        assert (
+            first.headers["x-amz-date"]
+            != second.headers["x-amz-date"]
+        )
+
+    def test_streaming_rejected_before_any_request(self, mock_http):
+        client, recorder = mock_http(reply())
+        with pytest.raises(BadRequestError) as err:
+            self.chat(client, stream=True)
+        assert "streaming" in str(err.value).lower()
+        assert recorder.requests == []
+
+    def test_embeddings_rejected(self, mock_http):
+        client, recorder = mock_http(reply())
+        with pytest.raises(BadRequestError, match="embeddings"):
+            rh.embedding(
+                model="bedrock/amazon.nova-lite-v1",
+                input=["hi"],
+                api_key="bk-1",
+                client=client,
+            )
+        assert recorder.requests == []
+
+    def test_responses_api_rejected_before_any_request(
+        self, mock_openai
+    ):
+        client, recorder = mock_openai(reply())
+        with pytest.raises(BadRequestError, match="Responses"):
+            rh.responses(
+                model="bedrock/amazon.nova-lite-v1",
+                input="hi",
+                api_key="bk-1",
+                client=client,
+            )
+        assert recorder.requests == []

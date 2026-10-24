@@ -3,8 +3,6 @@
 import importlib
 from typing import TYPE_CHECKING
 
-__version__ = "0.1.0"
-
 _LAZY = {
     "completion": "routehub.main",
     "acompletion": "routehub.main",
@@ -86,6 +84,25 @@ if TYPE_CHECKING:  # pragma: no cover
     )  # noqa: F401
 
 
+def _version() -> str:
+    """Read the installed version from the package metadata.
+
+    The version lives in pyproject.toml only, so the attribute can never
+    drift from the released package.
+
+    Returns:
+        str: The version string, or "0.0.0" when RouteHub is not installed.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        found = version("routehub")
+    except PackageNotFoundError:
+        found = "0.0.0"
+    globals()["__version__"] = found
+    return found
+
+
 def __getattr__(name: str):
     """Load a public name from its submodule on first access.
 
@@ -95,6 +112,8 @@ def __getattr__(name: str):
     Returns:
         Any: The requested function, class or value.
     """
+    if name == "__version__":
+        return _version()
     module = _LAZY.get(name)
     if module is None:
         raise AttributeError(
@@ -113,4 +132,4 @@ def __dir__() -> list:
     Returns:
         list: Attribute names.
     """
-    return sorted(set(globals()) | set(_LAZY))
+    return sorted(set(globals()) | set(_LAZY) | {"__version__"})

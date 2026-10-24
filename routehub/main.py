@@ -9,7 +9,9 @@ import uuid
 from dataclasses import dataclass
 from typing import (
     Any,
+    AsyncIterator,
     Dict,
+    Iterator,
     List,
     Literal,
     Optional,
@@ -129,6 +131,9 @@ _REASONING_REJECTS = (
 )
 # Providers that pass Anthropic cache_control markers through to Claude.
 _CACHE_CONTROL_PROVIDERS = frozenset({"openrouter"})
+# Providers whose OpenAI-compatible endpoint bills thinking tokens in
+# total_tokens without itemising them.
+_UNREPORTED_REASONING_PROVIDERS = frozenset({"gemini"})
 _RESPONSE_ONLY_KEYS = (
     "thinking_blocks",
     "reasoning_content",
@@ -600,6 +605,75 @@ def _openai_client(call: _Call, is_async: bool) -> Any:
     )
 
 
+def _fill_reasoning_tokens(usage: Any) -> None:
+    """Account for thinking tokens a provider bills but does not itemise.
+
+    Gemini's OpenAI-compatible endpoint adds thinking tokens to
+    total_tokens but leaves completion_tokens and
+    completion_tokens_details untouched, so an answer that spent its whole
+    budget thinking looks like a free empty reply. The gap goes into
+    reasoning_tokens and completion_tokens, the way OpenAI reports it, so
+    prompt plus completion equals total again.
+
+    Args:
+        usage (Any): The CompletionUsage of a response or usage chunk,
+            updated in place.
+    """
+    if usage is None:
+        return
+    prompt = usage.prompt_tokens or 0
+    completion = usage.completion_tokens or 0
+    gap = (usage.total_tokens or 0) - prompt - completion
+    if gap <= 0:
+        return
+    details = usage.completion_tokens_details
+    if details is not None and details.reasoning_tokens:
+        return
+    if details is None:
+        from openai.types.completion_usage import (
+            CompletionTokensDetails,
+        )
+
+        usage.completion_tokens_details = CompletionTokensDetails(
+            reasoning_tokens=gap
+        )
+    else:
+        details.reasoning_tokens = gap
+    usage.completion_tokens = completion + gap
+
+
+def _fix_usage(chunks: Iterator[Any]) -> Iterator[Any]:
+    """Yield stream chunks, repairing the usage chunk's token counts.
+
+    Args:
+        chunks (Iterator[Any]): The SDK's chunk iterator.
+
+    Returns:
+        Iterator[Any]: The same chunks.
+    """
+    for chunk in chunks:
+        if getattr(chunk, "usage", None) is not None:
+            _fill_reasoning_tokens(chunk.usage)
+        yield chunk
+
+
+async def _afix_usage(
+    chunks: AsyncIterator[Any],
+) -> AsyncIterator[Any]:
+    """Yield async stream chunks, repairing the usage chunk's token counts.
+
+    Args:
+        chunks (AsyncIterator[Any]): The SDK's async chunk iterator.
+
+    Returns:
+        AsyncIterator[Any]: The same chunks.
+    """
+    async for chunk in chunks:
+        if getattr(chunk, "usage", None) is not None:
+            _fill_reasoning_tokens(chunk.usage)
+        yield chunk
+
+
 def _openai_complete(call: _Call) -> Any:
     """Send a chat request through the OpenAI SDK.
 
@@ -624,10 +698,16 @@ def _openai_complete(call: _Call) -> Any:
         if mapped is error:
             raise
         raise mapped from error
+    fix_usage = call.provider in _UNREPORTED_REASONING_PROVIDERS
     if request.get("stream"):
+        chunks = iter(response)
+        if fix_usage:
+            chunks = _fix_usage(chunks)
         return ChatStream(
-            iter(response), response.close, call.provider, call.model
+            chunks, response.close, call.provider, call.model
         )
+    if fix_usage:
+        _fill_reasoning_tokens(getattr(response, "usage", None))
     return response
 
 
@@ -655,13 +735,16 @@ async def _openai_acomplete(call: _Call) -> Any:
         if mapped is error:
             raise
         raise mapped from error
+    fix_usage = call.provider in _UNREPORTED_REASONING_PROVIDERS
     if request.get("stream"):
+        chunks = response.__aiter__()
+        if fix_usage:
+            chunks = _afix_usage(chunks)
         return AsyncChatStream(
-            response.__aiter__(),
-            response.close,
-            call.provider,
-            call.model,
+            chunks, response.close, call.provider, call.model
         )
+    if fix_usage:
+        _fill_reasoning_tokens(getattr(response, "usage", None))
     return response
 
 

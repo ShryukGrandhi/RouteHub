@@ -18,7 +18,7 @@ Everything lives in `routehub/`.
 - `anthropic.py`: OpenAI chat to Messages translation (`build_request`, `to_chat_completion`) and the SSE `StreamTranslator`.
 - `streaming.py`: `ChatStream` and `AsyncChatStream`, which yield `ChatCompletionChunk`s and map errors raised mid-stream.
 - `exceptions.py`: litellm-named exceptions, `map_exception` and `exception_for_status`.
-- `registry.py`: model metadata from OpenRouter's catalog, fetched on first use and cached for 5 minutes.
+- `registry.py`: model metadata from OpenRouter's catalog, fetched on first use and cached for 5 minutes. The last successful fetch is written to `ROUTEHUB_CACHE_DIR` (default `~/.cache/routehub`) and read back when OpenRouter is unreachable. A built-in table covers embedding models, and `_fuzzy` maps serving-provider ids such as `groq/llama-3.3-70b-versatile` onto the vendor's entry.
 - `tokenizer.py`: `encode`, `decode` and `token_counter`, with tiktoken loaded on first use.
 - `get_all_models.py`: lists models from each provider's own models endpoint.
 - `utils.py`: the helpers litellm exposes under `litellm.utils`.
@@ -39,7 +39,7 @@ Everything lives in `routehub/`.
 ## Invariants: do not break these
 
 - `import routehub` loads no third-party modules. New public names go in `_LAZY`. `openai`, `pydantic` and the HTTP library are imported inside the functions that need them. `exceptions.py` (and `streaming.py`, which imports it) loads the OpenAI SDK at import, so other modules import them inside functions too.
-- No network calls at import time. The registry and `get_all_models` fetch on first use.
+- No network or disk access at import time. The registry and `get_all_models` fetch on first use, and the registry's disk cache is read and written only inside `_fetch`.
 - No module-level configuration. Every setting is a per-call argument; provider keys and base URLs may also come from environment variables, read on each call. A setting that changes client behaviour must be part of the client cache key in `clients.py`.
 - Return the OpenAI SDK's own types: `ChatCompletion`, `ChatCompletionChunk`, `CreateEmbeddingResponse`, and the SDK's `Response` (or its event stream) from `responses`. Don't re-wrap them.
 - Core dependencies stay `openai`, `pydantic` and `tiktoken`. Anything else is an optional extra.

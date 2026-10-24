@@ -148,6 +148,12 @@ class TestLazyImport:
         )
         assert out == "False"
 
+    def test_version_matches_the_installed_package(self):
+        from importlib.metadata import version
+
+        assert rh.__version__ == version("routehub")
+        assert "__version__" in dir(rh)
+
     def test_unknown_attribute_raises(self):
         with pytest.raises(AttributeError):
             rh.not_a_real_name

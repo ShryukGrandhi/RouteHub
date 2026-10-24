@@ -2,9 +2,13 @@
 
 Context windows, output limits, prices and capability flags come from
 https://openrouter.ai/api/v1/models and are cached for CACHE_TTL_SECONDS.
+The last successful fetch is also written to disk, so the catalog keeps
+working offline once it has been downloaded. A small built-in table covers
+embedding models, which OpenRouter does not list.
 """
 
 import logging
+import os
 import re
 import threading
 import time
@@ -15,6 +19,9 @@ logger = logging.getLogger("routehub")
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 CACHE_TTL_SECONDS = 300
 TIMEOUT_SECONDS = 10
+CACHE_DIR_ENV = "ROUTEHUB_CACHE_DIR"
+_CACHE_FILE = "openrouter_models.json"
+_OFF_VALUES = frozenset({"0", "false", "no", "off"})
 
 # RouteHub provider to OpenRouter vendor prefix.
 _VENDORS = {
@@ -38,6 +45,35 @@ _PROVIDERS_BY_VENDOR = {
     "moonshotai": "moonshot",
     "qwen": "dashscope",
 }
+# Vendors whose models accept Anthropic-style cache_control markers.
+_CACHE_CONTROL_VENDORS = frozenset({"anthropic"})
+
+# Suffixes serving providers add to a vendor's model name, such as Groq's
+# "llama-3.3-70b-versatile" for "meta-llama/llama-3.3-70b-instruct".
+_SERVING_SUFFIXES = frozenset(
+    {
+        "versatile",
+        "instant",
+        "instruct",
+        "it",
+        "chat",
+        "turbo",
+        "fast",
+        "free",
+        "hf",
+        "fp8",
+        "fp16",
+        "bf16",
+        "int4",
+        "int8",
+        "awq",
+        "gptq",
+    }
+)
+_CONTEXT_SUFFIX = re.compile(r"^(\d{4,}|\d+k)$")
+# Fireworks writes "llama-v3p3-70b" for Llama 3.3; Cerebras "llama3.1-8b".
+_P_VERSION = re.compile(r"-v(\d+)(?:p(\d+))?(?=-|$)")
+_GLUED_VERSION = re.compile(r"^([a-z]+)(\d)")
 
 _SUPPORT_FLAGS = (
     "supports_vision",
@@ -66,8 +102,52 @@ class ModelNotMappedError(Exception):
     """The model is in neither OpenRouter's list nor the registered models."""
 
 
+def _embedding(
+    provider: str,
+    max_input_tokens: int,
+    input_cost_per_token: float,
+    output_vector_size: int,
+) -> dict:
+    """Build the model-info entry for an embedding model.
+
+    Args:
+        provider (str): The RouteHub provider that serves it.
+        max_input_tokens (int): Input token limit.
+        input_cost_per_token (float): Price in USD per input token.
+        output_vector_size (int): Default embedding dimensions.
+
+    Returns:
+        dict: Model info in litellm's shape.
+    """
+    return {
+        "provider": provider,
+        "litellm_provider": provider,
+        "mode": "embedding",
+        "max_input_tokens": max_input_tokens,
+        "max_tokens": max_input_tokens,
+        "max_output_tokens": None,
+        "input_cost_per_token": input_cost_per_token,
+        "output_cost_per_token": 0.0,
+        "output_vector_size": output_vector_size,
+    }
+
+
+# Models OpenRouter's catalog does not carry. Registered entries override these.
+_BUILTIN: Dict[str, dict] = {
+    "text-embedding-3-small": _embedding("openai", 8191, 2e-8, 1536),
+    "text-embedding-3-large": _embedding(
+        "openai", 8191, 1.3e-7, 3072
+    ),
+    "text-embedding-ada-002": _embedding("openai", 8191, 1e-7, 1536),
+    "gemini-embedding-001": _embedding("gemini", 2048, 1.5e-7, 3072),
+    "mistral-embed": _embedding("mistral", 8192, 1e-7, 1024),
+}
+
 _catalog: Dict[str, dict] = {}
 _aliases: Dict[str, str] = {}
+# Bare alias names, shortest first, and vendor prefixes, for the fuzzy fallback.
+_bare_names: List[str] = []
+_catalog_vendors: frozenset = frozenset()
 _info_cache: Dict[str, dict] = {}
 _expires_at = 0.0
 _registered: Dict[str, dict] = {}
@@ -85,8 +165,80 @@ __all__ = [
 ]
 
 
+def _cache_path() -> Optional[str]:
+    """Locate the on-disk copy of the catalog.
+
+    ROUTEHUB_CACHE_DIR names the directory; "off" (or "0", "false", "no")
+    disables the disk cache. The default is $XDG_CACHE_HOME/routehub or
+    ~/.cache/routehub.
+
+    Returns:
+        Optional[str]: The file path, or None when disabled.
+    """
+    configured = os.environ.get(CACHE_DIR_ENV)
+    if configured is not None and configured != "":
+        if configured.strip().lower() in _OFF_VALUES:
+            return None
+        directory = configured
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+            os.path.expanduser("~"), ".cache"
+        )
+        directory = os.path.join(base, "routehub")
+    return os.path.join(directory, _CACHE_FILE)
+
+
+def _save_cache(entries: List[dict]) -> None:
+    """Write the catalog to disk, ignoring any filesystem error.
+
+    Args:
+        entries (List[dict]): The raw OpenRouter entries.
+    """
+    path = _cache_path()
+    if path is None:
+        return
+    try:
+        from routehub._json import dumps
+
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = dumps({"data": entries})
+        if isinstance(payload, str):
+            payload = payload.encode()
+        temp = f"{path}.{os.getpid()}.tmp"
+        with open(temp, "wb") as f:
+            f.write(payload)
+        os.replace(temp, path)
+    except Exception as error:
+        logger.debug(f"Could not write the model cache: {error}")
+
+
+def _load_cache() -> List[dict]:
+    """Read the last catalog written to disk.
+
+    Returns:
+        List[dict]: The raw entries, or an empty list when there are none.
+    """
+    path = _cache_path()
+    if path is None:
+        return []
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+        from routehub._json import loads
+
+        entries = loads(raw).get("data") or []
+    except Exception:
+        return []
+    if entries:
+        logger.warning(
+            f"Using the model catalog cached at {path}; capability "
+            "data may be stale until OpenRouter is reachable."
+        )
+    return entries
+
+
 def _fetch() -> List[dict]:
-    """Download OpenRouter's model list.
+    """Download OpenRouter's model list, falling back to the disk cache.
 
     Returns:
         List[dict]: The raw model entries, or an empty list on failure.
@@ -100,10 +252,13 @@ def _fetch() -> List[dict]:
         response.raise_for_status()
         from routehub._json import loads
 
-        return loads(response.content).get("data") or []
+        entries = loads(response.content).get("data") or []
     except Exception as error:
         logger.warning(f"Could not fetch OpenRouter models: {error}")
-        return []
+        return _load_cache()
+    if entries:
+        _save_cache(entries)
+    return entries
 
 
 def _normalize(name: str) -> str:
@@ -150,7 +305,8 @@ def _ensure_catalog() -> Dict[str, dict]:
     Returns:
         Dict[str, dict]: OpenRouter id to raw entry.
     """
-    global _catalog, _aliases, _expires_at
+    global _catalog, _aliases, _bare_names, _catalog_vendors
+    global _expires_at
     if time.monotonic() < _expires_at:
         return _catalog
     with _lock:
@@ -160,6 +316,13 @@ def _ensure_catalog() -> Dict[str, dict]:
         if entries:
             _catalog = {e["id"]: e for e in entries if e.get("id")}
             _aliases = _build_aliases(_catalog)
+            _bare_names = sorted(
+                (k for k in _aliases if "/" not in k),
+                key=lambda k: (len(k), k),
+            )
+            _catalog_vendors = frozenset(
+                k.split("/", 1)[0] for k in _aliases if "/" in k
+            )
             _info_cache.clear()
         # Expire even on failure so a dead endpoint is retried once a TTL.
         _expires_at = time.monotonic() + CACHE_TTL_SECONDS
@@ -168,9 +331,11 @@ def _ensure_catalog() -> Dict[str, dict]:
 
 def clear_model_cache() -> None:
     """Forget the cached OpenRouter list so the next lookup fetches again."""
-    global _catalog, _aliases, _expires_at
+    global _catalog, _aliases, _bare_names, _catalog_vendors
+    global _expires_at
     with _lock:
-        _catalog, _aliases = {}, {}
+        _catalog, _aliases, _bare_names = {}, {}, []
+        _catalog_vendors = frozenset()
         _info_cache.clear()
         _expires_at = 0.0
 
@@ -212,12 +377,12 @@ def _to_info(model_id: str, entry: dict) -> dict:
     context = entry.get("context_length") or top.get("context_length")
     max_output = top.get("max_completion_tokens")
     vendor = model_id.split("/", 1)[0]
+    provider = _PROVIDERS_BY_VENDOR.get(vendor, "openrouter")
     info = {
         "key": model_id,
         "name": entry.get("name"),
-        "litellm_provider": _PROVIDERS_BY_VENDOR.get(
-            vendor, "openrouter"
-        ),
+        "provider": provider,
+        "litellm_provider": provider,
         "mode": (
             "chat"
             if "text" in outputs or not outputs
@@ -247,7 +412,11 @@ def _to_info(model_id: str, entry: dict) -> dict:
         or "include_reasoning" in params
         or entry.get("reasoning") is not None,
         "supports_reasoning_effort": "reasoning_effort" in params,
-        "supports_prompt_caching": "input_cache_read" in pricing,
+        # True means cache_control markers are honoured, not merely that
+        # the provider has a cache price: Gemini and OpenAI cache on their
+        # own and reject or ignore the markers.
+        "supports_prompt_caching": vendor in _CACHE_CONTROL_VENDORS
+        and "input_cache_read" in pricing,
         "supports_web_search": "web_search_options" in params
         or "web_search" in pricing,
         "supports_system_messages": True,
@@ -287,19 +456,157 @@ def _candidates(
     return keys
 
 
-def _registered_entry(
+def _alias_for(name: str, vendor: Optional[str]) -> Optional[str]:
+    """Resolve a bare name to an OpenRouter id, within one vendor if given.
+
+    Args:
+        name (str): A bare model name such as "llama-3.3-70b-instruct".
+        vendor (Optional[str]): OpenRouter vendor prefix to stay within.
+
+    Returns:
+        Optional[str]: The OpenRouter id, or None.
+    """
+    model_id = _aliases.get(name)
+    if vendor is None:
+        return model_id
+    if model_id is not None and model_id.lower().startswith(
+        f"{vendor}/"
+    ):
+        return model_id
+    return _aliases.get(f"{vendor}/{name}")
+
+
+def _match_stem(stem: str, vendor: Optional[str]) -> Optional[str]:
+    """Find the catalog model a name stem most plausibly refers to.
+
+    Tries the stem itself, the stem with OpenRouter's usual "-instruct"
+    suffix, then the shortest catalog name that extends the stem.
+
+    Args:
+        stem (str): A normalized name with serving suffixes removed.
+        vendor (Optional[str]): OpenRouter vendor prefix to stay within.
+
+    Returns:
+        Optional[str]: The OpenRouter id, or None.
+    """
+    for key in (stem, f"{stem}-instruct"):
+        model_id = _alias_for(key, vendor)
+        if model_id is not None:
+            return model_id
+    prefix = f"{stem}-"
+    for name in _bare_names:
+        if name.startswith(prefix):
+            model_id = _alias_for(name, vendor)
+            if model_id is not None:
+                return model_id
+    return None
+
+
+def _strip_serving_suffixes(name: str) -> str:
+    """Remove the suffixes a serving provider appends to a vendor's name.
+
+    Args:
+        name (str): A normalized bare model name.
+
+    Returns:
+        str: The name without trailing serving suffixes or context sizes.
+    """
+    segments = name.split("-")
+    while len(segments) > 2 and (
+        segments[-1] in _SERVING_SUFFIXES
+        or _CONTEXT_SUFFIX.match(segments[-1])
+    ):
+        segments.pop()
+    return "-".join(segments)
+
+
+def _fuzzy(
     model: str, custom_llm_provider: Optional[str]
-) -> Optional[Tuple[str, dict]]:
-    """Find a model added with register_model.
+) -> Optional[str]:
+    """Map a provider-specific model id onto the vendor's catalog entry.
+
+    Serving providers rename vendor models: Groq serves
+    "llama-3.3-70b-versatile" for "meta-llama/llama-3.3-70b-instruct".
+    This strips serving suffixes and then drops trailing segments until a
+    catalog name matches, as long as what remains still carries a version
+    or size number.
 
     Args:
         model (str): A bare or provider-prefixed model name.
         custom_llm_provider (Optional[str]): Explicit provider.
 
     Returns:
+        Optional[str]: The OpenRouter id, or None when nothing is close.
+    """
+    from routehub.providers import split_model
+
+    lowered = model.lower()
+    if lowered.startswith("openrouter/"):
+        bare, vendor = lowered[len("openrouter/") :], None
+    else:
+        bare, provider = split_model(model, custom_llm_provider)
+        bare = bare.lower()
+        vendor = _VENDORS.get(provider or "")
+    if "/" in bare:
+        # "meta-llama/llama-4-scout-17b-16e-instruct" names its vendor;
+        # "accounts/fireworks/models/llama-v3p3-70b-instruct" does not.
+        path, bare = bare.rsplit("/", 1)
+        vendor = path if path in _catalog_vendors else None
+    if not any(ch.isdigit() for ch in bare):
+        return None
+    loosened = _GLUED_VERSION.sub(
+        r"\1-\2",
+        _P_VERSION.sub(
+            lambda m: f"-{m[1]}.{m[2]}" if m[2] else f"-{m[1]}", bare
+        ),
+    )
+    for candidate in dict.fromkeys((bare, loosened)):
+        stem = _strip_serving_suffixes(_normalize(candidate))
+        model_id = _match_segments(stem, vendor)
+        if model_id is not None:
+            return model_id
+    return None
+
+
+def _match_segments(
+    stem: str, vendor: Optional[str]
+) -> Optional[str]:
+    """Match a stem, dropping trailing segments while a number remains.
+
+    Args:
+        stem (str): A normalized name without serving suffixes.
+        vendor (Optional[str]): OpenRouter vendor prefix to stay within.
+
+    Returns:
+        Optional[str]: The OpenRouter id, or None.
+    """
+    segments = stem.split("-")
+    while len(segments) >= 2:
+        model_id = _match_stem("-".join(segments), vendor)
+        if model_id is not None:
+            return model_id
+        segments.pop()
+        if not any(ch.isdigit() for ch in "".join(segments)):
+            return None
+    return None
+
+
+def _table_entry(
+    table: Dict[str, dict],
+    model: str,
+    custom_llm_provider: Optional[str],
+) -> Optional[Tuple[str, dict]]:
+    """Find a model in a name-keyed table such as the registered models.
+
+    Args:
+        table (Dict[str, dict]): Model name to info.
+        model (str): A bare or provider-prefixed model name.
+        custom_llm_provider (Optional[str]): Explicit provider.
+
+    Returns:
         Optional[Tuple[str, dict]]: The key and entry, or None.
     """
-    if not _registered:
+    if not table:
         return None
     keys = [model]
     if custom_llm_provider:
@@ -307,8 +614,8 @@ def _registered_entry(
     if "/" in model:
         keys.append(model.split("/", 1)[1])
     for key in keys:
-        if key in _registered:
-            return key, _registered[key]
+        if key in table:
+            return key, table[key]
     return None
 
 
@@ -317,6 +624,10 @@ def _lookup(
 ) -> Optional[Tuple[str, dict]]:
     """Find the model info for a model string.
 
+    Registered models win, then OpenRouter's catalog by exact name, then
+    the built-in table, then the closest vendor entry for a serving
+    provider's id.
+
     Args:
         model (str): A bare or provider-prefixed model name.
         custom_llm_provider (Optional[str]): Explicit provider.
@@ -324,7 +635,7 @@ def _lookup(
     Returns:
         Optional[Tuple[str, dict]]: The matched key and model info, or None.
     """
-    found = _registered_entry(model, custom_llm_provider)
+    found = _table_entry(_registered, model, custom_llm_provider)
     if found:
         return found
     catalog = _ensure_catalog()
@@ -332,7 +643,33 @@ def _lookup(
         model_id = _aliases.get(key)
         if model_id is not None:
             return model_id, _to_info(model_id, catalog[model_id])
+    found = _table_entry(_BUILTIN, model, custom_llm_provider)
+    if found:
+        return found
+    model_id = _fuzzy(model, custom_llm_provider)
+    if model_id is not None:
+        return model_id, _to_info(model_id, catalog[model_id])
     return None
+
+
+def _requested_provider(
+    model: str, custom_llm_provider: Optional[str]
+) -> Optional[str]:
+    """The provider a model string names explicitly, if any.
+
+    Args:
+        model (str): A bare or provider-prefixed model name.
+        custom_llm_provider (Optional[str]): Explicit provider.
+
+    Returns:
+        Optional[str]: A RouteHub provider name, or None for bare names.
+    """
+    from routehub.providers import PROVIDERS, split_model
+
+    if not custom_llm_provider and "/" not in model:
+        return None
+    _, provider = split_model(model, custom_llm_provider)
+    return provider if provider in PROVIDERS else None
 
 
 class ModelList(list):
@@ -371,11 +708,12 @@ def __getattr__(name: str):
             model_id: _to_info(model_id, entry)
             for model_id, entry in catalog.items()
         }
+        merged.update(_BUILTIN)
         merged.update(_registered)
         return merged
     if name == "model_list":
         catalog = _ensure_catalog()
-        return ModelList([*catalog, *_registered])
+        return ModelList([*catalog, *_BUILTIN, *_registered])
     raise AttributeError(
         f"module 'routehub.registry' has no attribute {name!r}"
     )
@@ -415,7 +753,8 @@ def get_model_info(
 
     Returns:
         dict: Context window, output limit, prices and capability flags, with
-        a key field naming the matched model.
+        a key field naming the matched model and provider naming the
+        provider that serves it (litellm_provider is kept as an alias).
     """
     found = _lookup(model, custom_llm_provider)
     if found is None:
@@ -428,6 +767,13 @@ def get_model_info(
     key, entry = found
     info = dict(entry)
     info.setdefault("key", key)
+    provider = (
+        _requested_provider(model, custom_llm_provider)
+        or info.get("provider")
+        or info.get("litellm_provider")
+    )
+    info["provider"] = provider
+    info["litellm_provider"] = provider
     info.setdefault("max_input_tokens", info.get("max_tokens"))
     info.setdefault("max_output_tokens", info.get("max_tokens"))
     for flag in _SUPPORT_FLAGS:
@@ -570,7 +916,12 @@ def supports_system_messages(
 def supports_prompt_caching(
     model: str, custom_llm_provider: Optional[str] = None
 ) -> bool:
-    """Whether the provider caches prompts for this model.
+    """Whether cache_control markers are honoured for this model.
+
+    True for Claude, called directly or through OpenRouter. Providers that
+    cache automatically, such as OpenAI, and providers with their own
+    caching API, such as Gemini, answer False: markers are stripped before
+    the request and must not be relied on.
 
     Args:
         model (str): Model name.

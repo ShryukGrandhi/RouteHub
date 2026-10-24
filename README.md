@@ -91,9 +91,9 @@ response = asyncio.run(
 | **No global state** | Retries, TLS verification, timeouts and parameter dropping are arguments to each call. One tenant's `ssl_verify=False` or retry policy never leaks into another's, which matters when many teams or agents share a process. |
 | **Predictable errors** | Every provider failure is raised as a typed exception (`RateLimitError`, `ContextWindowExceededError`, `AuthenticationError` and so on) carrying the status code, provider and model. Each subclasses the matching OpenAI SDK exception, so existing handlers keep working. |
 | **Usage and cost visibility** | Token usage comes back in one shape for every provider, including cached input tokens and, where the provider reports them, reasoning tokens. `get_model_info` returns per-token prices, so spend can be computed per call. |
-| **Live model catalog** | `get_model_info` reads context windows, output limits, prices and capabilities from OpenRouter's live model list, and `get_all_models` queries each provider's own models API. Both cache for five minutes, there is no bundled data file to go stale, and private or fine-tuned models can be registered alongside. |
+| **Live model catalog** | `get_model_info` reads context windows, output limits, prices and capabilities from OpenRouter's live model list, and `get_all_models` queries each provider's own models API. Both cache for five minutes, the last catalog is kept on disk for offline runs, and private or fine-tuned models can be registered alongside. |
 | **Small supply-chain surface** | Three direct dependencies, `openai`, `pydantic` and `tiktoken`, for 20 installed packages in total, against 58 for litellm. API keys come from the environment or the call and are never written to logs. |
-| **Testable** | `mock_response` returns realistic responses, streams included, without a network call or an API key. RouteHub itself ships with 231 offline tests. |
+| **Testable** | `mock_response` returns realistic responses, streams included, without a network call or an API key. RouteHub itself ships with 324 offline tests. |
 | **Async throughout** | `acompletion`, `aembedding`, async streams and async model listing, with HTTP clients cached per event loop. |
 | **litellm-compatible** | The same function names and module paths (`routehub.utils`, `routehub.exceptions`), so migrating is mostly a change of import. See [Migrating from litellm](#migrating-from-litellm). |
 
@@ -233,6 +233,8 @@ A pydantic model becomes a strict `json_schema` response format. For Claude, the
 
 Claude's thinking is returned on the message as `reasoning_content` (text) and `thinking_blocks` (the signed blocks). Send `thinking_blocks` back on the assistant message for multi-turn tool use, as Anthropic requires. DeepSeek's `reasoning_content` comes through the same way.
 
+Thinking tokens are reported in `usage.completion_tokens_details.reasoning_tokens` and counted in `completion_tokens`, as OpenAI does. Gemini's OpenAI-compatible endpoint bills them in `total_tokens` only, so RouteHub fills in the difference; an answer that spent its whole `max_tokens` budget thinking comes back with `finish_reason == "length"`, empty content, and a usage block that adds up.
+
 ### Prompt caching with Claude
 
 ```python
@@ -250,7 +252,7 @@ print(response.usage.prompt_tokens_details.cached_tokens)   # tokens read from c
 print(response.usage.cache_creation_input_tokens)           # tokens written to cache
 ```
 
-`cache_control` markers on messages and tools go to Anthropic unchanged. `prompt_tokens` includes cache reads and writes, so cost accounting stays correct. Markers pass through to OpenRouter and are stripped for providers that cache automatically.
+`cache_control` markers on messages and tools go to Anthropic unchanged. `prompt_tokens` includes cache reads and writes, so cost accounting stays correct. Markers pass through to OpenRouter and are stripped for every other provider. `supports_prompt_caching(model)` answers `True` only where markers are honoured, which is Claude, directly or through OpenRouter. OpenAI caches long prompts on its own and Gemini has a separate caching API, so both answer `False` even though their catalog entries carry a cache-read price.
 
 ### Embeddings
 
@@ -310,6 +312,7 @@ Also per call: `api_key`, `base_url` or `api_base`, `api_version` (Azure), `cust
 | Provider keys and bases | See [Supported providers](#supported-providers). |
 | `ROUTEHUB_USE_ORJSON` | RouteHub uses `orjson` for JSON when it is installed (the `fast` extra). Set this to `0`, `false`, `no` or `off` to use the standard `json` module instead. Read once, on first use. |
 | `ROUTEHUB_GZIP_ON` | Set to `1`, `true`, `yes` or `on` to gzip Claude request bodies when a call doesn't pass `gzip=`. An explicit `gzip=False` still wins. Read on each call. |
+| `ROUTEHUB_CACHE_DIR` | Directory for the on-disk copy of the model catalog, used when OpenRouter is unreachable. Defaults to `$XDG_CACHE_HOME/routehub` or `~/.cache/routehub`. Set to `off` to keep nothing on disk. Read on each fetch. |
 
 ## Error handling
 
@@ -354,7 +357,15 @@ routehub.supports_function_calling("deepseek/deepseek-chat")
 "claude-sonnet-4-6" in routehub.model_list    # True
 ```
 
-This data comes from [OpenRouter's model list](https://openrouter.ai/api/v1/models), fetched on first use and cached for five minutes; if a refresh fails, the previous data is kept. Anthropic-style names are matched to OpenRouter's (`claude-opus-4-7-20251001` finds `anthropic/claude-opus-4.7`). The `supports_*` functions return `False` for unknown models, and `get_model_info` raises `ModelNotMappedError`.
+This data comes from [OpenRouter's model list](https://openrouter.ai/api/v1/models), fetched on first use and cached for five minutes; if a refresh fails, the previous data is kept. Each successful fetch is also written to `~/.cache/routehub/openrouter_models.json` (or `$XDG_CACHE_HOME/routehub`), and that file is used when OpenRouter cannot be reached, so an offline or air-gapped run keeps the catalog it last saw. `ROUTEHUB_CACHE_DIR` moves the file; set it to `off` to disable the disk cache. The `supports_*` functions return `False` for unknown models, and `get_model_info` raises `ModelNotMappedError`.
+
+Names are matched the way providers spell them:
+
+- Anthropic-style names find OpenRouter's (`claude-opus-4-7-20251001` finds `anthropic/claude-opus-4.7`).
+- Serving providers' ids find the vendor's entry. `groq/llama-3.3-70b-versatile`, `together_ai/meta-llama/Llama-3.3-70B-Instruct-Turbo`, `fireworks_ai/accounts/fireworks/models/llama-v3p3-70b-instruct` and `cerebras/llama3.3-70b` all resolve to `meta-llama/llama-3.3-70b-instruct`. The match strips serving suffixes (`-versatile`, `-instant`, `-turbo`, context sizes) and then shortens the name while it still carries a version or size number, so `no-such-model` stays unmapped. Output limits come from the vendor's catalog entry and may differ from what the serving provider allows.
+- Embedding models, which OpenRouter does not list, come from a small built-in table: `text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`, `gemini-embedding-001` and `mistral-embed`, with `mode == "embedding"`.
+
+Every entry carries `provider`, the RouteHub provider that serves it. A provider-prefixed lookup reports that prefix (`groq/llama-3.3-70b-versatile` reports `groq`), a bare name reports the vendor's provider. `litellm_provider` holds the same value for code written against litellm.
 
 Register private, fine-tuned or self-hosted models. Registered entries take priority and never expire:
 
@@ -436,7 +447,7 @@ Commands, invariants and PR conventions for contributors and coding agents are i
 
 ```bash
 uv sync
-uv run pytest                        # 231 offline tests, no API keys needed
+uv run pytest                        # 324 offline tests, no API keys needed
 uv run --extra fast pytest           # with orjson installed
 uv run --with "openai<3" pytest      # against openai 2.x
 uv run ruff check .                  # lint

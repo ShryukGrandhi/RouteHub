@@ -642,6 +642,129 @@ class TestStreaming:
         assert text == "Async"
 
 
+THINKING_ONLY = {
+    "prompt_tokens": 4,
+    "completion_tokens": 0,
+    "total_tokens": 65,
+}
+
+
+class TestUnreportedReasoningTokens:
+    """Gemini bills thinking tokens in total_tokens without itemising them."""
+
+    def test_gemini_gap_becomes_reasoning_tokens(self, mock_openai):
+        body = chat_completion(content=None)
+        body["choices"][0]["finish_reason"] = "length"
+        body["usage"] = THINKING_ONLY
+        client, _ = mock_openai(httpx.Response(200, json=body))
+        response = rh.completion(
+            model="gemini/gemini-2.5-pro",
+            messages=USER,
+            client=client,
+        )
+        usage = response.usage
+        assert usage.completion_tokens_details.reasoning_tokens == 61
+        assert usage.completion_tokens == 61
+        assert usage.prompt_tokens == 4
+        assert usage.total_tokens == 65
+
+    def test_gemini_stream_usage_chunk_is_repaired(self, mock_openai):
+        parts = [
+            chunk({"content": "x"}),
+            chunk(finish="length"),
+            chunk(choices=False, usage=THINKING_ONLY),
+            "data: [DONE]\n\n",
+        ]
+        client, _ = mock_openai(
+            httpx.Response(
+                200,
+                content="".join(parts).encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+        )
+        chunks = list(
+            rh.completion(
+                model="gemini/gemini-2.5-pro",
+                messages=USER,
+                stream=True,
+                stream_options={"include_usage": True},
+                client=client,
+            )
+        )
+        usage = chunks[-1].usage
+        assert usage.completion_tokens_details.reasoning_tokens == 61
+        assert usage.completion_tokens == 61
+
+    async def test_gemini_async_stream_is_repaired(self, mock_openai):
+        parts = [
+            chunk({"content": "x"}),
+            chunk(choices=False, usage=THINKING_ONLY),
+            "data: [DONE]\n\n",
+        ]
+        client, _ = mock_openai(
+            httpx.Response(
+                200,
+                content="".join(parts).encode(),
+                headers={"content-type": "text/event-stream"},
+            ),
+            is_async=True,
+        )
+        stream = await rh.acompletion(
+            model="gemini/gemini-2.5-pro",
+            messages=USER,
+            stream=True,
+            stream_options={"include_usage": True},
+            client=client,
+        )
+        chunks = [c async for c in stream]
+        assert (
+            chunks[
+                -1
+            ].usage.completion_tokens_details.reasoning_tokens
+            == 61
+        )
+
+    def test_consistent_usage_is_left_alone(self, mock_openai):
+        client, _ = mock_openai(ok(content="Hi"))
+        response = rh.completion(
+            model="gemini/gemini-2.5-pro",
+            messages=USER,
+            client=client,
+        )
+        assert response.usage.completion_tokens == 1
+        assert response.usage.completion_tokens_details is None
+
+    def test_itemised_reasoning_is_kept(self, mock_openai):
+        body = chat_completion()
+        body["usage"] = {
+            **THINKING_ONLY,
+            "completion_tokens_details": {"reasoning_tokens": 40},
+        }
+        client, _ = mock_openai(httpx.Response(200, json=body))
+        response = rh.completion(
+            model="gemini/gemini-2.5-pro",
+            messages=USER,
+            client=client,
+        )
+        assert (
+            response.usage.completion_tokens_details.reasoning_tokens
+            == 40
+        )
+        assert response.usage.completion_tokens == 0
+
+    def test_other_providers_are_not_touched(self, mock_openai):
+        body = chat_completion()
+        body["usage"] = THINKING_ONLY
+        client, _ = mock_openai(httpx.Response(200, json=body))
+        response = rh.completion(
+            model="groq/llama-3.3-70b-versatile",
+            messages=USER,
+            client=client,
+        )
+        assert response.usage.completion_tokens == 0
+        assert response.usage.completion_tokens_details is None
+
+
 class TestAsync:
     async def test_acompletion_matches_completion(self, mock_openai):
         client, recorder = mock_openai(

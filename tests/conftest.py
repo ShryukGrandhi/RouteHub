@@ -91,9 +91,28 @@ CATALOG = [
             "input_modalities": ["text", "image", "audio"],
             "output_modalities": ["text"],
         },
-        "pricing": {"prompt": "0.00000125", "completion": "0.00001"},
+        "pricing": {
+            "prompt": "0.00000125",
+            "completion": "0.00001",
+            "input_cache_read": "0.0000003",
+        },
         "top_provider": {"max_completion_tokens": 65536},
         "supported_parameters": ["reasoning", "tools"],
+    },
+    {
+        "id": "meta-llama/llama-3.3-70b-instruct",
+        "name": "Meta: Llama 3.3 70B Instruct",
+        "context_length": 131072,
+        "architecture": {
+            "input_modalities": ["text"],
+            "output_modalities": ["text"],
+        },
+        "pricing": {"prompt": "0.0000001", "completion": "0.0000003"},
+        "top_provider": {
+            "context_length": 131072,
+            "max_completion_tokens": 16384,
+        },
+        "supported_parameters": ["tools", "tool_choice"],
     },
     {
         "id": "deepseek/deepseek-chat",
@@ -131,11 +150,15 @@ def _all_key_vars():
 
 
 @pytest.fixture(autouse=True)
-def fake_env(monkeypatch):
+def fake_env(monkeypatch, tmp_path):
     """Clear real credentials, set fake ones, and reset every cache."""
     for name in _all_key_vars():
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("ROUTEHUB_GZIP_ON", raising=False)
+    # Keep the registry's disk cache out of the real home directory.
+    monkeypatch.setenv(
+        registry.CACHE_DIR_ENV, str(tmp_path / "cache")
+    )
     for name in FAKE_KEYS:
         monkeypatch.setenv(name, f"test-{name.lower()}")
     registry.clear_model_cache()

@@ -6,7 +6,7 @@
 <p align="left">
   <a href="https://swarms.ai">Swarms Website</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
-  <a href="https://docs.swarms.world">Documentation</a>
+  <a href="https://docs.swarms.world/routehub/overview">Documentation</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
   <a href="https://swarms.world">Swarms Marketplace</a>
   <span>&nbsp;&nbsp;•&nbsp;&nbsp;</span>
